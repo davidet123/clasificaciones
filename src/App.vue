@@ -21,8 +21,8 @@
 </script>
 
 <style>
-/* body {
+body {
   padding: 20px;
-} */
+}
 
 </style>

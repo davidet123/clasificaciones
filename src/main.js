@@ -9,6 +9,9 @@ import { createVuetify } from 'vuetify'
 import * as components from 'vuetify/components'
 import * as directives from 'vuetify/directives'
 
+// Leaflet CSS global
+import 'leaflet/dist/leaflet.css';
+
 import App from './App.vue'
 import router from './router'
 

@@ -12,6 +12,9 @@ import * as directives from 'vuetify/directives'
 // Leaflet CSS global
 import 'leaflet/dist/leaflet.css';
 
+// ⬇️ Nuevo: arranque global de Live
+import { startAppBootstrap } from '@/boot/appBootstrap';
+
 import App from './App.vue'
 import router from './router'
 
@@ -26,3 +29,6 @@ app.use(router)
 app.use(vuetify)
 
 app.mount('#app')
+
+// Lanza el bootstrap una vez montada la app
+startAppBootstrap();

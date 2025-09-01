@@ -67,7 +67,7 @@
           <tbody>
             <tr v-for="d in devices" :key="d.id">
               <td>
-                <v-chip :style="{background:d.color,color:'white'}" size="small">{{ d.id }}</v-chip>
+                <v-chip :style="{background:d.color,color:'white'}" size="small">{{ displayName(d.id) }}</v-chip>
               </td>
               <td> {{ d.cpIdx ?? 0 }} / {{ totalCps }} </td>
               <td> {{ (d.progressPct ?? 0).toFixed(1) }}% </td>
@@ -173,6 +173,12 @@ import { useGpxStore } from '@/stores/gpxStore';
 import { formatPace, formatHMSfromMs } from '@/utils/geo';
 import { msToHMS as hms, parseHMSToMs } from '@/stores/trackingStore';
 
+import { useRaceConfigStore } from '@/stores/raceConfigStore';
+const race = useRaceConfigStore();
+
+// Nombre visible → si no hay, cae al id
+const displayName = (id) => (race.devicesConfig?.[id]?.name?.trim() || id);
+
 const props = defineProps({ modelValue: { type: Boolean, default: false } });
 const emit = defineEmits(['update:modelValue']);
 
@@ -187,6 +193,17 @@ const { list } = storeToRefs(tracking);
 const devices = list;
 const totalCps = computed(() => gpx.cps?.length ? gpx.cps.length - 1 : 0);
 const etaStartPercent = computed(() => tracking.etaStartPercent);
+
+// Cargar config guardada en localStorage al montar ⬅️ NUEVO
+onMounted(() => { race.init?.(); });
+
+// Sincronizar placeholders cuando lleguen nuevos IDs de Live ⬅️ NUEVO
+const idsLive = computed(() => (tracking.list || []).map(d => d.id));
+watch(
+  () => idsLive.value.join(','),
+  () => { if (idsLive.value.length) race.ensureDevices(idsLive.value); },
+  { immediate: true }
+);
 
 // Crono
 const now = ref(Date.now());

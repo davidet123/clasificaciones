@@ -44,6 +44,11 @@ const router = createRouter({
       name: 'replay',
       component: () => import('../views/ReplayPage.vue'),
     },
+    {
+      path: '/config',
+      name: 'ConfigCarrera',
+      component: () => import('../views/ConfigCarrera.vue'),
+    },
     
   ],
 })

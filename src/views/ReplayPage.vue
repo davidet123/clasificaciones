@@ -96,6 +96,10 @@ import { useTrackingStore } from '@/stores/trackingStore';
 import { useReplayStore } from '@/stores/replayStore';
 import { formatPace } from '@/utils/geo';
 import SidebarAjustes from '@/components/SidebarAjustes.vue';
+import { useRaceConfigStore } from '@/stores/raceConfigStore';
+
+const race = useRaceConfigStore();
+const displayName = (id) => (race.devicesConfig?.[id]?.name?.trim() || id);
 
 const props = defineProps({
   gpxPath: { type: String, default: '/assets/ruta_apunt_1.gpx' },
@@ -158,7 +162,7 @@ function buildPopupContent(d) {
   const container = document.createElement('div');
 
   const b = document.createElement('b');
-  b.textContent = d.id;
+  b.textContent = displayName(d.id); // ⬅️ cambio: nombre visible
   container.appendChild(b);
   container.appendChild(document.createElement('br'));
 

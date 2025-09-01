@@ -25,7 +25,7 @@
     <div class="legend" v-if="devices.length">
       <div v-for="d in devices" :key="d.id" class="leg-item">
         <span class="dot" :style="{ backgroundColor: d.color || '#e53935' }"></span>
-        <span class="id">{{ d.id }}</span>
+        <span class="id">{{ displayName(d.id) }}</span>
         <span class="km">{{ (d.kmRecorridos ?? 0).toFixed(2) }} km</span>
       </div>
     </div>
@@ -37,9 +37,13 @@ import { computed } from 'vue';
 import { useGpxStore } from '@/stores/gpxStore';
 import { useTrackingStore } from '@/stores/trackingStore';
 import PerfilAltimetrico from '@/components/PerfilAltimetrico.vue';
+import { useRaceConfigStore } from '@/stores/raceConfigStore'; // ⬅️ añadido
 
 const gpx = useGpxStore();
 const tracking = useTrackingStore();
+
+const race = useRaceConfigStore();
+const displayName = (id) => (race.devicesConfig?.[id]?.name?.trim() || id);
 
 const devices = computed(() => tracking.list);
 const positions = computed(() =>

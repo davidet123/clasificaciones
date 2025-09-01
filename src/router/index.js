@@ -31,9 +31,20 @@ const router = createRouter({
     },
     {
       path: '/mapa',
-      name: 'mapa',
+      name: 'Mapa',
       component: () => import('../views/MapaCarrera.vue'),
     },
+    {
+      path: '/perfil',
+      name: 'Perfil',
+      component: () => import('../views/PerfilAltimetricoPage.vue'),
+    },
+    {
+      path: '/replay',
+      name: 'replay',
+      component: () => import('../views/ReplayPage.vue'),
+    },
+    
   ],
 })
 

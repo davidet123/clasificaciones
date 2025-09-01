@@ -1,6 +1,6 @@
 // src/stores/gpxStore.js
 import { defineStore } from 'pinia';
-import { parseGPX, resamplePolyline } from '@/utils/geo';
+import { parseGPX, resamplePolyline, haversineKm } from '@/utils/geo';
 
 export const useGpxStore = defineStore('gpx', {
   state: () => ({
@@ -13,7 +13,7 @@ export const useGpxStore = defineStore('gpx', {
     totalKm: 0,
 
     // Checkpoints para cálculo
-    cps: [],         // [{lat, lon, kmAcc, idxSeg, tSeg}]
+    cps: [],         // [{lat, lon, ele, kmAcc}]
     cpStepMeters: 50,
     name: 'Ruta GPX'
   }),
@@ -27,15 +27,33 @@ export const useGpxStore = defineStore('gpx', {
         if (!res.ok) throw new Error(`No se pudo cargar GPX (${res.status})`);
         const xml = await res.text();
 
-        const { points, totalKm } = parseGPX(xml);
+        // 1) Parse básico para points + totalKm
+        const parsed = parseGPX(xml);
+        const points = parsed.points || [];
+        const totalKm = parsed.totalKm || 0;
+
         this.points = points;
         this.totalKm = totalKm;
 
-        // Resolución adaptativa hacia ~400 CP, clamp 5–100 m salvo que pases stepMeters
+        // 2) Resolución adaptativa hacia ~400 CP, clamp 5–100 m salvo que pases stepMeters
         const adaptive = Math.max(5, Math.min(100, Math.round((totalKm * 1000) / 400)));
         const step = stepMeters ?? adaptive;
 
-        const { cps } = resamplePolyline(points, step);
+        // 3) Generar cps usando resamplePolyline (ahora devuelve { cps })
+        const { cps: sampled } = resamplePolyline(points, step);
+        const cps = [];
+        let acc = 0;
+        if (sampled.length) {
+          cps.push({ lat: sampled[0].lat, lon: sampled[0].lon, ele: sampled[0].ele, kmAcc: 0 });
+          for (let i = 1; i < sampled.length; i++) {
+            acc += haversineKm(
+              sampled[i - 1].lat, sampled[i - 1].lon,
+              sampled[i].lat, sampled[i].lon
+            );
+            cps.push({ lat: sampled[i].lat, lon: sampled[i].lon, ele: sampled[i].ele, kmAcc: acc });
+          }
+        }
+
         this.cps = cps;
         this.cpStepMeters = step;
 
@@ -47,11 +65,28 @@ export const useGpxStore = defineStore('gpx', {
         this.loading = false;
       }
     },
+
     resample(stepMeters = 50) {
       if (!this.points.length) return;
-      const { cps } = resamplePolyline(this.points, stepMeters);
+
+      // ✅ Corregido: desestructuramos cps
+      const { cps: sampled } = resamplePolyline(this.points, stepMeters);
+      const cps = [];
+      let acc = 0;
+      if (sampled.length) {
+        cps.push({ lat: sampled[0].lat, lon: sampled[0].lon, ele: sampled[0].ele, kmAcc: 0 });
+        for (let i = 1; i < sampled.length; i++) {
+          acc += haversineKm(
+            sampled[i - 1].lat, sampled[i - 1].lon,
+            sampled[i].lat, sampled[i].lon
+          );
+          cps.push({ lat: sampled[i].lat, lon: sampled[i].lon, ele: sampled[i].ele, kmAcc: acc });
+        }
+      }
+
       this.cps = cps;
       this.cpStepMeters = stepMeters;
     }
+
   }
 });

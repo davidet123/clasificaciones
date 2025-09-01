@@ -1,484 +1,501 @@
 // src/stores/trackingStore.js
-// ETA robusta, cronómetro auto al pasar CP1, ventana por metros + EMA,
-// off-route flexible, clamps ETA. Añadido:
-// - Consistencia de ritmo (std de ritmos recientes)
-// - Objetivo personal (PB) por dispositivo con persistencia
-// - Delta vs PB y bandera onTarget para resaltar en el mapa
-
 import { defineStore } from 'pinia';
+import { useGpxStore } from '@/stores/gpxStore';
 import {
-  kmhToPaceMinPerKm,
   progressBetweenCps,
-  haversineKm
+  haversineKm,
+  kmhToPaceMinPerKm,
 } from '@/utils/geo';
-import { useGpxStore } from './gpxStore';
 
-const COLORS = ['#e53935', '#1e88e5', '#43a047', '#fb8c00', '#8e24aa'];
-
-function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
-function msToHMS(ms){
-  const s = Math.max(0, Math.floor(ms/1000));
-  const hh = String(Math.floor(s/3600)).padStart(2,'0');
-  const mm = String(Math.floor((s%3600)/60)).padStart(2,'0');
-  const ss = String(s%60).padStart(2,'0');
-  return `${hh}:${mm}:${ss}`;
-}
-function parseHMSToMs(str){
-  if (!str) return null;
-  const parts = str.trim().split(':').map(Number);
-  if (parts.some(isNaN)) return null;
-  let h=0,m=0,s=0;
-  if (parts.length === 3){ [h,m,s]=parts; }
-  else if (parts.length === 2){ [m,s]=parts; }
-  else if (parts.length === 1){ [s]=parts; }
-  return ((h*3600)+(m*60)+s)*1000;
-}
+// Paleta por si quieres colores por id simples
+const COLORS = ['#e53935', '#1e88e5', '#43a047', '#fb8c00', '#8e24aa', '#00acc1'];
 
 export const useTrackingStore = defineStore('tracking', {
   state: () => ({
-    connected: false,
-    ws: null,
+    // Dispositivos
+    byId: {},      // id -> device object
+    list: [],      // array ordenada para UI
 
-    devices: {
-      // [id]: {
-      //   ... estado de seguimiento ...
-      //   personalBest: { pbTimeMs, pbDistanceKm, targetPaceMinPerKm }
-      //   consistency: { paceStdSec, paceVarLabel, samples: number }
-      //   target: { deltaToPBms, onTarget, gapPaceSecPerKm }
-      // }
-    },
-
-    // Crono global
+    // Crono global (ms desde "fuente de tiempo")
     startTime: null,
-    lastMessageAt: null,
 
-    // ---------- CONFIG ROBUSTEZ ----------
-    // Velocidad de entrada YA en km/h (normalizada en servidor)
-    speedIncomingUnit: 'kmh',
+    // Fuente de tiempo (para replay se inyecta tPlay)
+    _timeSource: null,
 
-    // Saltos imposibles por ruido
-    maxJumpSpeedKmh: 36,       // ~10 m/s
+    // WS
+    _ws: null,
+    _wsUrl: null,
+    _wsConnected: false,
 
-    // Off-route (distancia perpendicular a la proyección)
-    offRouteMeters: 35,        // rechazo duro = 2x esto
+    // Parámetros de cálculo
+    etaStartPercent: 0.08,       // no armar ETA hasta 8% del GPX
+    offRouteMaxMeters: 40,       // tolerancia de desvío al track
+    historyMaxSec: 240,          // mantener ~4 min de histórico por dispositivo
+    emaAlphaSpeed: 0.25,         // suavizado de velocidad instantánea
 
-    // Ventana por metros para media reciente (valor máximo; el efectivo es adaptativo)
-    lastMetersWindowMax: 0.6,  // km (600 m), efectivo = min(600m, 30% ruta, >=200m)
-
-    // Suavizado
-    emaAlpha: 0.20,
-
-    // Gaps (solo afectan a confianza)
-    gapShortSec: 4,
-    gapMediumSec: 20,
-
-    // Paradas y congelación (solo si de verdad paras)
-    stopSpeedKmh: 0.5,
-    stopGraceSec: 8,
-
-    // Clamp de ETA
-    etaChangeClampSec: 5,
-    etaChangeClampFinalSec: 3,
-    finalTightKm: 0.3,
-
-    // Activación de ETA por progreso
-    etaStartPercent: 0.05,     // 5% de la ruta
-    etaStartMinKm: 0.25,       // al menos 250 m
-
-    // Consistencia de ritmo
-    consistencyWindowKmMax: 2.0,     // ventana sup. para consistencia
-    consistencyWindowKmMin: 1.0,     // ventana inf. para consistencia
-    // Etiquetas por std (seg/km)
-    consistencyBandsSec: [6, 12, 20], // muy constante / constante / variable / muy variable
-
-    // Historial
-    historyMaxSec: 240,
+    // Opcional: para numerar colores
+    _colorIdx: 0,
   }),
+
   getters: {
-    list(state) {
-      return Object.entries(state.devices).map(([id, v]) => ({ id, ...v }));
-    },
-    elapsedMs(state) {
-      return state.startTime ? Date.now() - state.startTime : 0;
-    }
+    etaStartPercentLabel: (s) => Math.round(s.etaStartPercent * 100),
+    isCronoRunning: (s) => !!s.startTime,
   },
+
   actions: {
-    // PB helpers (persistencia localStorage)
-    _pbKey(id){ return `pb:${id}`; },
-    loadPB(id){
+    /* ===========================
+     *  Gestión de tiempo / Crono global
+     * =========================== */
+
+    setTimeSource(fnOrNull) {
+      // fnOrNull: () => number (ms). Si null, usa Date.now()
+      this._timeSource = typeof fnOrNull === 'function' ? fnOrNull : null;
+    },
+    _nowMs() {
       try {
-        const raw = localStorage.getItem(this._pbKey(id));
-        if (!raw) return null;
-        const o = JSON.parse(raw);
-        if (!o || typeof o.pbTimeMs !== 'number') return null;
-        return o;
-      } catch { return null; }
-    },
-    savePB(id, pb){
-      try { localStorage.setItem(this._pbKey(id), JSON.stringify(pb)); } catch {}
-    },
-    setPersonalBest(id, pbTimeMs, pbDistanceKm){
-      const gpx = useGpxStore();
-      const dev = this.devices[id]; if (!dev) return;
-      const distKm = (typeof pbDistanceKm === 'number' && pbDistanceKm > 0) ? pbDistanceKm : (gpx.totalKm || 0);
-      const paceMinPerKm = distKm > 0 ? (pbTimeMs/1000) / 60 / distKm : null;
-      dev.personalBest = {
-        pbTimeMs: pbTimeMs || null,
-        pbDistanceKm: distKm,
-        targetPaceMinPerKm: paceMinPerKm
-      };
-      if (pbTimeMs) this.savePB(id, dev.personalBest);
+        const v = this._timeSource ? this._timeSource() : Date.now();
+        return Number.isFinite(v) ? v : Date.now();
+      } catch {
+        return Date.now();
+      }
     },
 
-    startCrono(){ this.startTime = Date.now(); },
-    stopCrono(){ this.startTime = null; },
-
-    // Modo test: forzar inicio en CP1
-    forceStartAtFirstCP() {
-      const gpx = useGpxStore();
-      if (!gpx.loaded || !gpx.cps.length) return;
-      this.startTime = Date.now();
-      Object.values(this.devices).forEach(dev => {
-        dev.prevCpIdx = 0;
-        dev.cpIdx = 1;
-        const km1 = gpx.cps[1]?.kmAcc ?? 0;
-        dev.kmRecorridos = km1;
-        dev.kmRestantes = Math.max(0, gpx.totalKm - km1);
-        dev.distDesdeCPm = 0;
-        dev.distHastaCPm = ((gpx.cps[2]?.kmAcc ?? km1) - km1) * 1000;
-        dev.progressPct = gpx.totalKm > 0 ? (dev.kmRecorridos / gpx.totalKm) * 100 : 0;
-      });
+    // Arranque manual del crono global (sin mirar CPs)
+    startCronoGlobal() {
+      if (!this.startTime) this.startTime = this._nowMs();
     },
 
-    resetAll() {
+    // Compat: algunos componentes antiguos llaman a esto
+    startCronoAtFirstCP() { this.startCronoGlobal(); },
+    // Compat: botón viejo "forceStartAtFirstCP"
+    forceStartAtFirstCP() { this.startCronoGlobal(); },
+
+    stopCrono() {
       this.startTime = null;
-      this.devices = {};
+    },
+    resetCrono() {
+      this.startTime = null;
+    },
+    // Usado por la UI (tenías un resetAll en el panel)
+    resetAll() {
+      this.stopCrono();
+      // Limpia métricas por dispositivo pero conserva ids/colores
+      for (const d of this.list) {
+        d.last = null;
+        d.history = [];
+        d.historyProj = [];
+        d.kmRecorridos = 0;
+        d.kmRestantes = useGpxStore().totalKm || 0;
+        d.cpIdx = 0;
+        d.progressPct = 0;
+        d.paceAvgMinPerKm = null;
+        d.emaSpeed = null;
+        d.etaArmed = false;
+        d.etaMs = null;
+        d.target = { deltaToPBms: null, onTarget: false };
+        d.consistency = null;
+        d.status = { offRoute: false, outlierJump: false, frozenEta: false, gapSec: 0 };
+      }
     },
 
-    connectWS(url = 'ws://localhost:3000') {
-      if (this.ws) try { this.ws.close(); } catch {}
-      const ws = new WebSocket(url);
-      this.ws = ws;
-      ws.onopen = () => { this.connected = true; };
-      ws.onclose = () => {
-        this.connected = false;
-        setTimeout(() => this.connectWS(url), 2000);
+    // Si el dispositivo ya está más allá de CP1 y el crono aún no está, arráncalo
+    ensureCronoStartedIfBeyondCp1(deviceId) {
+      const d = this.byId?.[deviceId] || this.list.find(x => x.id === deviceId);
+      if (!d) return;
+      const cp = Number(d.cpIdx ?? 0);
+      if (!this.startTime && cp >= 1) {
+        this.startTime = this._nowMs();
+      }
+    },
+
+    /* ===========================
+     *  Entrada de puntos para REPLAY (inyecta como si fuera WS)
+     * =========================== */
+
+    ingestReplayPoint(id, datos) {
+      const info = {
+        identificador: String(id),
+        datos: {
+          lat: Number(datos.lat),
+          lon: Number(datos.lon),
+          velocidad: Number(datos.velocidad) || 0, // km/h
+          altitud: Number(datos.altitud) || 0,
+          direccion: Number(datos.direccion) || 0,
+        }
       };
-      ws.onerror = (e) => { console.warn('[WS error]', e); };
-      ws.onmessage = this.onMessage;
+      if (!this.byId[id]) {
+        console.debug('[tracking] first point for', id, info.datos);
+      }
+      this._applyIncoming(info);
+    },
+
+    /* ===========================
+     *  WebSocket LIVE
+     * =========================== */
+
+    connectWS(url) {
+      try {
+        if (this._ws) {
+          try { this._ws.close(); } catch {}
+          this._ws = null;
+        }
+        this._wsUrl = url;
+        const ws = new WebSocket(url);
+        this._ws = ws;
+
+        ws.onopen = () => { this._wsConnected = true; };
+        ws.onclose = () => { this._wsConnected = false; if (this._ws === ws) this._ws = null; };
+        ws.onerror = () => { /* silenciar */ };
+        ws.onmessage = (evt) => {
+          try {
+            this.onMessage(evt);
+          } catch (e) {
+            console.error('trackingStore.onMessage error', e);
+          }
+        };
+      } catch (e) {
+        console.error('connectWS failed', e);
+      }
+    },
+
+    disconnectWS() {
+      if (this._ws) {
+        try { this._ws.close(); } catch {}
+        this._ws = null;
+      }
+      this._wsConnected = false;
     },
 
     onMessage(evt) {
-      this.lastMessageAt = Date.now();
-
-      let payload; try { payload = JSON.parse(evt.data); } catch { return; }
-      const arr = Array.isArray(payload) ? payload : [payload];
-
-      const gpx = useGpxStore();
-      if (!gpx.loaded || !gpx.cps.length) return;
-
-      // Parámetros ADAPTATIVOS según la ruta cargada
-      const totalKm = gpx.totalKm || 0;
-      const winKm = Math.min(
-        this.lastMetersWindowMax,
-        Math.max(0.2, totalKm * 0.30)      // 30% de la ruta, mínimo 200 m
-      );
-      const clampFinalKm = Math.min(this.finalTightKm, Math.max(0.1, totalKm * 0.08)); // tramo final adaptativo
-      const offRouteHardMeters = this.offRouteMeters * 2; // rechazo duro
-      const etaStartKm = Math.max(this.etaStartMinKm, totalKm * this.etaStartPercent);
-
-      // Ventana de consistencia
-      const consWin = clamp(totalKm * 0.30, this.consistencyWindowKmMin, this.consistencyWindowKmMax);
-
-      for (const msg of arr) {
-        const id = String(msg?.identificador ?? '');
-        const d = msg?.datos ?? null;
-        if (!id || !d) continue;
-
-        const ts = Date.now();
-        const rawLat = Number(d.lat);
-        const rawLon = Number(d.lon);
-        const velKmh = Number(d.velocidad ?? 0); // ya en km/h
-        const alt = d.altitud ?? null;
-        const dir = d.direccion ?? null;
-
-        // Crear dispositivo si no existe
-        if (!this.devices[id]) {
-          const color = COLORS[Object.keys(this.devices).length % COLORS.length];
-
-          // Carga PB persistido si existe
-          const pbSaved = this.loadPB(id);
-          let personalBest = null;
-          if (pbSaved && typeof pbSaved.pbTimeMs === 'number') {
-            const distKm = pbSaved.pbDistanceKm ?? totalKm;
-            const pace = distKm > 0 ? (pbSaved.pbTimeMs/1000)/60/distKm : null;
-            personalBest = { pbTimeMs: pbSaved.pbTimeMs, pbDistanceKm: distKm, targetPaceMinPerKm: pace };
-          }
-
-          this.devices[id] = {
-            color,
-
-            // Dibujo (GPS crudo)
-            last: null,
-            history: [],
-
-            // Cálculo (sobre proyección)
-            historyProj: [],
-            proj: null,
-
-            // Progreso
-            kmRecorridos: 0,
-            kmRestantes: totalKm,
-            distDesdeCPm: 0,
-            distHastaCPm: 0,
-            cpIdx: 0,
-            prevCpIdx: 0,
-            progressPct: 0,
-
-            // Métricas
-            paceNowMinPerKm: null,
-            paceAvgMinPerKm: null,
-            etaMs: null,
-            etaArmed: false,
-            _emaV: null,
-            _lastEtaMsRaw: null,
-            _lastEtaMsShown: null,
-            _lastUpdateTs: null,
-            _lastProjForCalc: null,
-
-            // Objetivo personal
-            personalBest,  // puede ser null al inicio
-            target: { deltaToPBms: null, onTarget: false, gapPaceSecPerKm: null },
-
-            // Consistencia
-            consistency: { paceStdSec: null, paceVarLabel: null, samples: 0 },
-
-            // Estado/calidad
-            status: {
-              offRoute: false,
-              outlierJump: false,
-              gapSec: 0,
-              frozenEta: false,
-              speedUnit: 'kmh',
-              confidence: 100
-            }
-          };
-        }
-
-        const dev = this.devices[id];
-
-        // Gap de llegada (solo para info/confianza)
-        const prevTs = dev._lastUpdateTs ?? ts;
-        const deltaTs = Math.max(0, (ts - prevTs) / 1000);
-        dev.status.gapSec = deltaTs;
-
-        // Dibujo crudo
-        dev.last = { lat: rawLat, lon: rawLon, velKmh, alt, dir, ts };
-        dev.history.push(dev.last);
-        const minTs = ts - this.historyMaxSec * 1000;
-        dev.history = dev.history.filter(p => p.ts >= minTs);
-
-        // Salto imposible (por posición cruda)
-        let outlierJump = false;
-        if (dev.history.length >= 2) {
-          const prev = dev.history[dev.history.length - 2];
-          const dKm = haversineKm(prev.lat, prev.lon, rawLat, rawLon);
-          const dtH = Math.max(1e-6, (ts - prev.ts) / 3600000);
-          const vJump = dKm / dtH;
-          if (vJump > this.maxJumpSpeedKmh) outlierJump = true;
-        }
-
-        // CP más cercano
-        let bestIdx = 0, bestDistKmToCP = Infinity;
-        for (let i = 0; i < gpx.cps.length; i++) {
-          const dKm = haversineKm(rawLat, rawLon, gpx.cps[i].lat, gpx.cps[i].lon);
-          if (dKm < bestDistKmToCP) { bestDistKmToCP = dKm; bestIdx = i; }
-        }
-        dev.prevCpIdx = dev.cpIdx;
-        dev.cpIdx = Math.max(0, Math.min(bestIdx, gpx.cps.length - 2));
-
-        // Proyección y progreso
-        const prog = progressBetweenCps(rawLat, rawLon, gpx.cps, gpx.totalKm, dev.cpIdx);
-        const perpDistM = haversineKm(rawLat, rawLon, prog.projLat, prog.projLon) * 1000;
-
-        // Off-route según proyección
-        const offRoute = perpDistM > this.offRouteMeters;
-
-        // ACEPTACIÓN para CÁLCULO:
-        // Solo rechazo por salto imposible o off-route DURO (> 2x).
-        const rejectForCalc =
-          outlierJump ||
-          perpDistM > offRouteHardMeters;
-
-        if (!rejectForCalc) {
-          dev.kmRecorridos = prog.kmRecorridos;
-          dev.kmRestantes = prog.kmRestantes;
-          dev.distDesdeCPm = prog.distDesdeCPm;
-          dev.distHastaCPm = prog.distHastaCPm;
-          dev.proj = { lat: prog.projLat, lon: prog.projLon, ts, perpDistM };
-          dev._lastProjForCalc = dev.proj;
-
-          dev.progressPct = totalKm > 0 ? (dev.kmRecorridos / totalKm) * 100 : 0;
-
-          dev.historyProj.push({ lat: prog.projLat, lon: prog.projLon, ts, kmRecorridos: dev.kmRecorridos });
-          dev.historyProj = dev.historyProj.filter(p => p.ts >= minTs);
-
-          // AUTO-START del crono al pasar por CP1 (o más)
-          if (this.startTime == null && dev.prevCpIdx === 0 && dev.cpIdx >= 1) {
-            this.startCrono();
-          }
-        } else {
-          if (dev._lastProjForCalc) dev.proj = { ...dev._lastProjForCalc };
-          else dev.proj = null;
-        }
-
-        // Ritmos
-        dev.paceNowMinPerKm = kmhToPaceMinPerKm(velKmh);
-
-        // Velocidad media por metros recientes: ventana ADAPTATIVA
-        const hist = dev.historyProj;
-        let vAvgKmhMeters = 0;
-        if (hist && hist.length >= 2) {
-          const latest = hist[hist.length - 1];
-          let idx = hist.length - 2;
-          while (idx >= 0 && (latest.kmRecorridos - hist[idx].kmRecorridos) < winKm) idx--;
-          idx = Math.max(0, idx);
-          const first = hist[idx];
-          const distKm = Math.max(0, latest.kmRecorridos - first.kmRecorridos);
-          const dtH = (latest.ts - first.ts) / 3600000;
-          vAvgKmhMeters = dtH > 0 ? (distKm / dtH) : 0;
-        }
-
-        // Semillado/actualización de EMA:
-        const vSeed = (vAvgKmhMeters > 0 ? vAvgKmhMeters : (velKmh > 0 ? velKmh : 0));
-        if (vSeed > 0) {
-          dev._emaV = dev._emaV == null
-            ? vSeed
-            : (this.emaAlpha * vSeed + (1 - this.emaAlpha) * dev._emaV);
-        }
-        dev.paceAvgMinPerKm = kmhToPaceMinPerKm(dev._emaV ?? 0);
-
-        // --------- ETA activable por porcentaje ----------
-        dev.etaArmed = dev.kmRecorridos >= etaStartKm;
-
-        // ETA base (solo si crono en marcha Y etaArmed)
-        let etaRaw = null;
-        const v = dev._emaV && dev._emaV > 0 ? dev._emaV : 0;
-        if (v > 0 && this.startTime != null && dev.etaArmed) {
-          const kmRest = Math.max(0, gpx.totalKm - dev.kmRecorridos);
-          const hoursLeft = kmRest / v;
-          const msLeft = hoursLeft * 3600000;
-          const alreadyMs = Date.now() - this.startTime;
-          etaRaw = msLeft + alreadyMs;
-        }
-
-        // Consistencia de ritmo (std de ritmos en ventana por metros)
-        // Construimos ritmos por tramo dentro de una ventana consWin hacia atrás
-        let paceStdSec = null, samples = 0;
-        if (hist && hist.length >= 3) {
-          const latest = hist[hist.length - 1];
-          let idx = hist.length - 2;
-          while (idx >= 0 && (latest.kmRecorridos - hist[idx].kmRecorridos) < consWin) idx--;
-          idx = Math.max(0, idx);
-          // Ritmos tramo-a-tramo en s/km
-          const pacesSec = [];
-          for (let i = idx; i < hist.length - 1; i++) {
-            const a = hist[i], b = hist[i+1];
-            const dk = Math.max(0, b.kmRecorridos - a.kmRecorridos);
-            const dt = Math.max(0, (b.ts - a.ts) / 1000); // s
-            if (dk > 0 && dt > 0) {
-              const vKmh = (dk) / (dt/3600);
-              const paceMin = kmhToPaceMinPerKm(vKmh);
-              if (paceMin && isFinite(paceMin)) {
-                pacesSec.push(paceMin*60);
-              }
-            }
-          }
-          // Limpieza simple: recorte 10% extremos
-          pacesSec.sort((x,y)=>x-y);
-          if (pacesSec.length >= 5) {
-            const cut = Math.floor(pacesSec.length * 0.1);
-            const core = pacesSec.slice(cut, pacesSec.length - cut);
-            const n = core.length;
-            if (n >= 3) {
-              const mean = core.reduce((a,b)=>a+b,0)/n;
-              const varr = core.reduce((a,b)=>a+(b-mean)*(b-mean),0)/n;
-              paceStdSec = Math.sqrt(varr);
-              samples = n;
-            }
-          }
-        }
-        if (paceStdSec != null) {
-          const [b1,b2,b3] = this.consistencyBandsSec;
-          let label = 'muy variable';
-          if (paceStdSec <= b1) label = 'muy constante';
-          else if (paceStdSec <= b2) label = 'constante';
-          else if (paceStdSec <= b3) label = 'variable';
-          dev.consistency = { paceStdSec, paceVarLabel: label, samples };
-        } else {
-          dev.consistency = { paceStdSec: null, paceVarLabel: null, samples: 0 };
-        }
-
-        // Congelación SOLO por parada breve (no por gap)
-        const isStopped = v < this.stopSpeedKmh;
-        let frozen = false;
-        if (isStopped && dev.status.gapSec <= this.stopGraceSec && dev._lastEtaMsShown != null) {
-          etaRaw = dev._lastEtaMsShown;
-          frozen = true;
-        }
-
-        // Clamp de ETA (más estricto en tramo final adaptativo)
-        let etaClamped = etaRaw;
-        if (etaRaw != null) {
-          const clampSec = (dev.kmRestantes <= clampFinalKm) ? this.etaChangeClampFinalSec : this.etaChangeClampSec;
-          if (dev._lastEtaMsShown != null) {
-            const diff = etaRaw - dev._lastEtaMsShown;
-            const maxDelta = clampSec * 1000;
-            if (diff > maxDelta) etaClamped = dev._lastEtaMsShown + maxDelta;
-            else if (diff < -maxDelta) etaClamped = dev._lastEtaMsShown - maxDelta;
-          }
-        }
-
-        // Estado y confianza (gap solo baja el score)
-        dev.status.offRoute = offRoute;
-        dev.status.outlierJump = outlierJump;
-        dev.status.frozenEta = !!frozen;
-        dev.status.speedUnit = 'kmh';
-
-        let conf = 100;
-        if (offRoute) conf -= 20;
-        if (perpDistM > offRouteHardMeters) conf -= 15;
-        if (outlierJump) conf -= 25;
-        if (dev.status.gapSec > this.gapShortSec) conf -= 15;
-        if (v <= 0) conf -= 10;
-        if (!dev.proj) conf -= 10;
-        dev.status.confidence = Math.max(0, Math.min(100, conf));
-
-        // Persistencia de ETA
-        dev._lastEtaMsRaw = etaRaw ?? dev._lastEtaMsRaw;
-        dev._lastEtaMsShown = etaClamped ?? dev._lastEtaMsShown;
-        dev.etaMs = dev._lastEtaMsShown ?? null;
-
-        // --- Delta vs PB y gap de ritmo ---
-        if (dev.personalBest && dev.personalBest.pbTimeMs && this.startTime != null && dev.etaArmed && dev.etaMs != null) {
-          const targetPaceMinPerKm = dev.personalBest.targetPaceMinPerKm;
-          const refDist = dev.personalBest.pbDistanceKm || totalKm;
-          const adjustedTargetTimeMs = (targetPaceMinPerKm ? targetPaceMinPerKm * 60 * (totalKm || refDist) * 1000 : dev.personalBest.pbTimeMs);
-          const deltaMs = Math.round(dev.etaMs - adjustedTargetTimeMs);
-          const gapPaceSecPerKm = (dev.paceAvgMinPerKm && targetPaceMinPerKm) ? Math.round((dev.paceAvgMinPerKm - targetPaceMinPerKm)*60) : null;
-          dev.target = {
-            deltaToPBms: deltaMs,
-            onTarget: deltaMs <= 0,        // SOLO nos importa si va mejor (negativo)
-            gapPaceSecPerKm
-          };
-        } else {
-          dev.target = { deltaToPBms: null, onTarget: false, gapPaceSecPerKm: null };
-        }
-
-        dev._lastUpdateTs = ts;
+      // Espera objetos sueltos o arrays desde tu proxy
+      // Contrato: { identificador, datos: { lat, lon, velocidad(km/h), altitud, direccion } }
+      let payload;
+      try {
+        payload = typeof evt.data === 'string' ? JSON.parse(evt.data) : evt.data;
+      } catch {
+        return;
       }
-    }
+      if (!payload) return;
+
+      // puede venir array
+      const items = Array.isArray(payload) ? payload : [payload];
+
+      for (const it of items) {
+        if (!it || !it.identificador || !it.datos) continue;
+        this._applyIncoming(it);
+      }
+    },
+
+    /* ===========================
+     *  Núcleo de actualización
+     * =========================== */
+
+    _applyIncoming(info) {
+      const gpx = useGpxStore();
+      if (!gpx.loaded || !gpx.cps?.length) {
+        // sin GPX cargado aún, ignora
+        return;
+      }
+
+      const ts = this._nowMs();
+
+      // Datos normalizados
+      const id = String(info.identificador);
+      const lat = Number(info.datos.lat);
+      const lon = Number(info.datos.lon);
+      const velKmhRaw = Number(info.datos.velocidad) || 0;
+      const alt = Number(info.datos.altitud) || 0;
+      const dir = Number(info.datos.direccion) || 0;
+
+      // Crea dispositivo si no existe
+      let d = this.byId[id];
+      if (!d) {
+        d = this.byId[id] = {
+          id,
+          color: COLORS[this._colorIdx++ % COLORS.length],
+          last: null,
+          history: [],         // [{ts, lat, lon, velKmh}]
+          historyProj: [],     // [{ts, km}]
+          kmRecorridos: 0,
+          kmRestantes: gpx.totalKm,
+          cpIdx: 0,
+          progressPct: 0,
+          paceAvgMinPerKm: null,
+          emaSpeed: null,
+          etaArmed: false,
+          etaMs: null,         // ms restantes estimados (contdown)
+          target: { deltaToPBms: null, onTarget: false },
+          personalBest: { pbTimeMs: null, pbDistanceKm: null, targetPaceMinPerKm: null },
+          consistency: null,
+          status: { offRoute: false, outlierJump: false, frozenEta: false, gapSec: 0 },
+        };
+        this.list.push(d);
+      }
+
+      // Gap de recepción
+      if (d.last?.ts) {
+        d.status.gapSec = (ts - d.last.ts) / 1000;
+      } else {
+        d.status.gapSec = 0;
+      }
+
+      // Filtro de salto grosero (protege de dientes de sierra)
+      let outlierJump = false;
+      if (d.last?.lat != null && d.last?.lon != null && d.last?.ts) {
+        const dt = Math.max(0.001, (ts - d.last.ts) / 1000);
+        const dKm = haversineKm(d.last.lat, d.last.lon, lat, lon);
+        const vKmhGeom = (dKm / (dt / 3600));
+        if (vKmhGeom > 60) outlierJump = true; // a pie, 60 km/h es un salto
+      }
+      d.status.outlierJump = outlierJump;
+
+      // Histórico crudo (limitado por tiempo)
+      d.history.push({ ts, lat, lon, velKmh: velKmhRaw, alt, dir });
+      const cutoff = ts - this.historyMaxSec * 1000;
+      while (d.history.length && d.history[0].ts < cutoff) d.history.shift();
+
+      // Proyección sobre GPX con ventana alrededor del último cpIdx
+      const proj = progressBetweenCps(lat, lon, gpx.cps, gpx.totalKm, Math.max(0, d.cpIdx - 3));
+      d.kmRecorridos = proj.kmRecorridos;
+      d.kmRestantes = proj.kmRestantes;
+
+      // Off-route aproximado por distancia lateral a segmento
+      d.status.offRoute = proj && typeof proj.distDesdeCPm === 'number'
+        ? (proj.distDesdeCPm < -this.offRouteMaxMeters || proj.distHastaCPm < -this.offRouteMaxMeters)
+        : false;
+
+      // cpIdx por km acumulado (búsqueda binaria)
+      d.cpIdx = findCpIdxByKm(gpx.cps, d.kmRecorridos);
+      d.progressPct = gpx.totalKm > 0 ? (d.kmRecorridos / gpx.totalKm) * 100 : 0;
+
+      // Histórico proyectado
+      d.historyProj.push({ ts, km: d.kmRecorridos });
+      while (d.historyProj.length && d.historyProj[0].ts < cutoff) d.historyProj.shift();
+
+      // Velocidad suavizada (EMA)
+      if (d.emaSpeed == null) d.emaSpeed = velKmhRaw;
+      d.emaSpeed = this.emaAlphaSpeed * velKmhRaw + (1 - this.emaAlphaSpeed) * d.emaSpeed;
+
+      // Ritmo rolling (min/km)
+      d.paceAvgMinPerKm = kmhToPaceMinPerKm(d.emaSpeed);
+
+      // ===== Crono global: auto-start al cruzar CP1, y stop en meta =====
+      if (!this.startTime) {
+        if (d.cpIdx >= 1) {
+          this.startTime = this._nowMs();
+        }
+      } else {
+        if (d.kmRecorridos >= gpx.totalKm - 1e-6) {
+          this.stopCrono(); // meta alcanzada
+        }
+      }
+
+      // ===== ETA (se arma tras % mínimo) =====
+      const armed = (d.kmRecorridos / gpx.totalKm) >= this.etaStartPercent;
+      d.etaArmed = armed;
+      if (armed) {
+        const remKm = Math.max(0, d.kmRestantes);
+        const vAvg = this._avgSpeedKmhByDistance(d.historyProj, 0.35); // media en ~35% del camino reciente
+        const vStable = robustSpeedKmh(d.emaSpeed, vAvg);
+        if (vStable > 0.1 && remKm > 0) {
+          const hoursLeft = remKm / vStable;
+          d.etaMs = Math.round(hoursLeft * 3600 * 1000); // ms restantes
+          d.status.frozenEta = false;
+        } else {
+          d.status.frozenEta = true;
+        }
+      } else {
+        d.etaMs = null;
+        d.status.frozenEta = false;
+      }
+
+      // ===== PB / Objetivo =====
+      updatePersonalBestTarget(d, gpx.totalKm);
+      if (d.personalBest?.pbTimeMs && d.etaArmed && Number.isFinite(d.etaMs)) {
+        const pbAdjMs = d.personalBest.pbTimeMs * (gpx.totalKm / (d.personalBest.pbDistanceKm || gpx.totalKm));
+        const delta = d.etaMs - pbAdjMs;
+        d.target.deltaToPBms = delta;
+        d.target.onTarget = delta <= 0;
+      } else {
+        d.target.deltaToPBms = null;
+        d.target.onTarget = false;
+      }
+
+      // ===== Consistencia (buckets ~200 m + MAD-lite) =====
+      d.consistency = computeConsistency(d.historyProj);
+
+      // Último
+      d.last = { ts, lat, lon, velKmh: velKmhRaw, alt, dir };
+    },
+
+    /* ===========================
+     *  PB helpers / API pública
+     * =========================== */
+
+    setPersonalBest(id, pbTimeMs, pbDistKm) {
+      const d = this.byId?.[id];
+      if (!d) return;
+      if (!d.personalBest) d.personalBest = {};
+      d.personalBest.pbTimeMs = Number(pbTimeMs);
+      if (Number.isFinite(pbDistKm) && pbDistKm > 0) {
+        d.personalBest.pbDistanceKm = Number(pbDistKm);
+      }
+      // ritmo objetivo para info
+      updatePersonalBestTarget(d, useGpxStore().totalKm);
+    },
+
+    /* ===========================
+     *  Utilidades internas
+     * =========================== */
+
+    // Velocidad media por distancia: tramo reciente, recorta outliers, media simple
+    _avgSpeedKmhByDistance(historyProj, fraction = 0.3) {
+      if (!Array.isArray(historyProj) || historyProj.length < 2) return 0;
+      const totalDt = historyProj[historyProj.length - 1].ts - historyProj[0].ts;
+      if (totalDt <= 0) return 0;
+
+      const totalKmSpan = historyProj[historyProj.length - 1].km - historyProj[0].km;
+      if (totalKmSpan <= 0) return 0;
+
+      // ventana por distancia: último (fraction * totalKmSpan), acotado 0.15..1.2 km
+      const spanKm = clamp(totalKmSpan * fraction, 0.15, 1.2);
+      const endKm = historyProj[historyProj.length - 1].km;
+      const startKm = Math.max(historyProj[0].km, endKm - spanKm);
+
+      // Integración por pares dentro de la ventana
+      let distKm = 0;
+      let timeMs = 0;
+      for (let i = historyProj.length - 1; i > 0; i--) {
+        const a = historyProj[i - 1], b = historyProj[i];
+        if (b.km <= startKm) break;
+        const kmA = Math.max(startKm, a.km);
+        const kmB = b.km;
+        if (kmB <= kmA) continue;
+        const tA = a.ts, tB = b.ts;
+        const segKm = kmB - kmA;
+        const segMs = Math.max(0, tB - tA);
+        // descartar segmentos raros (fuera de 3:00/km..15:00/km)
+        const vKmh = segMs > 0 ? (segKm / (segMs / 3600000)) : 0;
+        if (vKmh > 20 || vKmh < 4) continue; // a pie
+        distKm += segKm;
+        timeMs += segMs;
+      }
+      if (timeMs <= 0 || distKm <= 0) return 0;
+      const v = distKm / (timeMs / 3600000);
+      return v;
+    },
   }
 });
 
-export { msToHMS, parseHMSToMs };
+/* ===========================
+ *  Helpers fuera del store
+ * =========================== */
+
+// Encuentra cpIdx tal que cps[i].kmAcc <= km < cps[i+1].kmAcc
+function findCpIdxByKm(cps, km) {
+  let lo = 0, hi = cps.length - 2;
+  if (km <= cps[0].kmAcc) return 0;
+  if (km >= cps[cps.length - 1].kmAcc) return cps.length - 2;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (cps[mid].kmAcc <= km && km < cps[mid + 1].kmAcc) return mid;
+    if (km >= cps[mid + 1].kmAcc) lo = mid + 1; else hi = mid - 1;
+  }
+  return Math.max(0, Math.min(cps.length - 2, lo));
+}
+
+// Suavizado robusto de velocidad: combina EMA e integración reciente si existe
+function robustSpeedKmh(ema, avgRecent) {
+  if (avgRecent > 0 && ema > 0) return 0.5 * ema + 0.5 * avgRecent;
+  if (avgRecent > 0) return avgRecent;
+  return Math.max(0, ema || 0);
+}
+
+// Consistencia de ritmo con buckets por distancia (~200 m) y MAD lite
+function computeConsistency(historyProj) {
+  if (!Array.isArray(historyProj) || historyProj.length < 3) return null;
+
+  // Crear buckets de ~0.2 km
+  const targetKm = 0.2;
+  const buckets = [];
+  let accStart = historyProj[0].km;
+  let tStart = historyProj[0].ts;
+
+  for (let i = 1; i < historyProj.length; i++) {
+    const a = historyProj[i - 1], b = historyProj[i];
+    const dk = b.km - a.km;
+    const dt = b.ts - a.ts;
+    if (dt <= 0 || dk <= 0) continue;
+
+    if ((b.km - accStart) >= targetKm) {
+      const segKm = b.km - accStart;
+      const segMs = b.ts - tStart;
+      const vKmh = segMs > 0 ? (segKm / (segMs / 3600000)) : 0;
+      const paceMin = kmhToPaceMinPerKm(vKmh);
+      if (paceMin && paceMin > 0) buckets.push(paceMin * 60); // s/km
+      accStart = b.km;
+      tStart = b.ts;
+    }
+  }
+  if (buckets.length < 4) return null;
+
+  // Trim outliers y MAD
+  buckets.sort((a, b) => a - b);
+  const qLo = buckets[Math.floor(buckets.length * 0.1)];
+  const qHi = buckets[Math.floor(buckets.length * 0.9)];
+  const trimmed = buckets.filter(x => x >= qLo && x <= qHi);
+  if (trimmed.length < 3) return null;
+
+  const median = trimmed[Math.floor(trimmed.length / 2)];
+  const deviations = trimmed.map(x => Math.abs(x - median)).sort((a, b) => a - b);
+  const mad = deviations[Math.floor(deviations.length / 2)];
+  const stdEq = 1.4826 * mad; // aproximación std
+
+  const label =
+    stdEq <= 6 ? 'muy constante' :
+    stdEq <= 10 ? 'constante' :
+    stdEq <= 18 ? 'variable' : 'muy variable';
+
+  return { paceStdSec: stdEq, paceVarLabel: label };
+}
+
+// PB helper
+function updatePersonalBestTarget(d, gpxTotalKm) {
+  const pbMs = d.personalBest?.pbTimeMs;
+  const pbKm = d.personalBest?.pbDistanceKm || gpxTotalKm || 0;
+  if (!pbMs || !pbKm) {
+    d.personalBest = d.personalBest || {};
+    d.personalBest.targetPaceMinPerKm = null;
+    return;
+  }
+  const paceMinPerKm = (pbMs / 60000) / pbKm;
+  d.personalBest.targetPaceMinPerKm = paceMinPerKm;
+}
+
+/* ===========================
+ *  Export utilidades usadas fuera
+ * =========================== */
+
+export function msToHMS(ms) {
+  const v = Number(ms);
+  if (!isFinite(v) || v < 0) return '00:00:00';
+  const s = Math.floor(v / 1000);
+  const hh = Math.floor(s / 3600);
+  const mm = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+}
+
+export function parseHMSToMs(str) {
+  if (!str || typeof str !== 'string') return 0;
+  const parts = str.trim().split(':').map(Number);
+  if (parts.some(p => !Number.isFinite(p))) return 0;
+  let hh = 0, mm = 0, ss = 0;
+  if (parts.length === 3) [hh, mm, ss] = parts;
+  else if (parts.length === 2) [mm, ss] = parts;
+  else if (parts.length === 1) ss = parts[0];
+  return ((hh * 3600) + (mm * 60) + ss) * 1000;
+}
+
+// Pequeñas utilidades locales
+function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }

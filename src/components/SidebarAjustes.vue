@@ -54,6 +54,8 @@
               <th>Km</th>
               <th>Rest.</th>
               <th>Vel</th>
+              <th>Media</th>
+              <th>Pendiente</th>
               <th>Ritmo</th>
               <th>ETA</th>
               <th>Consistencia</th>
@@ -72,6 +74,16 @@
               <td>{{ (d.kmRecorridos ?? 0).toFixed(2) }}</td>
               <td>{{ (d.kmRestantes ?? 0).toFixed(2) }}</td>
               <td>{{ (d.last?.velKmh ?? 0).toFixed(1) }} km/h</td>
+              <td>{{ d.avgSpeedKmh != null ? d.avgSpeedKmh.toFixed(1) : '—' }} km/h</td>
+
+              <!-- Pendiente -->
+              <td>
+                <span v-if="d.slopePct != null">
+                  {{ d.slopePct >= 0 ? '+' : '' }}{{ d.slopePct.toFixed(1) }}%
+                </span>
+                <span v-else>—</span>
+              </td>
+
               <td>{{ formatPace(d.paceAvgMinPerKm) }}</td>
 
               <!-- ETA -->
@@ -186,7 +198,7 @@ const running = computed(() => !!tracking.startTime);
 const elapsedMs = computed(() => tracking.startTime ? (now.value - tracking.startTime) : 0);
 const elapsedLabel = computed(() => formatHMSfromMs(elapsedMs.value));
 
-function forceStart(){ tracking.forceStartAtFirstCP(); }
+function forceStart(){ tracking.startCronoGlobal(); }
 function reset(){ tracking.resetAll(); }
 function stop(){ tracking.stopCrono(); }
 
@@ -218,11 +230,6 @@ function formatDeltaSeconds(ms){
   if (ms == null || !isFinite(ms)) return '—';
   const s = Math.round(Math.abs(ms)/1000);
   return `${sign(ms)} ${s}s`;
-}
-
-function paceGapText(sec){
-  const sign = sec >= 0 ? '+' : '';
-  return `${sign}${sec} s/km vs objetivo`;
 }
 
 function consColor(d){

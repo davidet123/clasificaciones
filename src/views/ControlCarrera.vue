@@ -117,16 +117,77 @@
         </div>
       </div>
 
-      <!-- Crono simple -->
+      <div class="block">
+        <div class="block-title">Corredores (DSK)</div>
+
+        <div class="row">
+          <v-text-field
+            v-model="dorsalQuery"
+            label="Dorsal"
+            density="comfortable"
+            type="number"
+            hide-details
+            style="max-width: 180px"
+            @keyup.enter="searchRunner"
+          />
+          <v-btn class="ml-2" size="small" variant="tonal" @click="searchRunner">Buscar</v-btn>
+        </div>
+
+        <!-- Mensajes / tarjeta -->
+        <div class="mt-3" v-if="runnerSel">
+          <RunnerVmixCard :runner="runnerSel" @went-live="onRunnerWentLive" />
+        </div>
+        <div class="mt-2 text-medium-emphasis" v-else-if="!dorsalQuery">
+          Introduce un dorsal existente para mostrar el corredor.
+        </div>
+        <div class="mt-2 text-error" v-else>
+          DORSAL NO ENCONTRADO
+        </div>
+
+        <!-- Histórico vertical (solo lectura, items de una línea) -->
+        <div class="history mt-3" v-if="runnerHistory.length">
+          <div class="history-title">Histórico (últimos 10)</div>
+          <RunnerHistoryItem
+            v-for="h in runnerHistory"
+            :key="h.dorsal"
+            :runner="h"
+            @became-off-air="onHistoryItemOffAir(h)"
+          />
+        </div>
+      </div>
+
+
+     <!-- Crono (vMix) -->
       <div class="block">
         <div class="block-title">Crono (vMix)</div>
         <div class="row">
           <v-btn size="small" @click="vmix.iniciarCrono()">Start</v-btn>
           <v-btn size="small" @click="vmix.pausarCrono()">Pause</v-btn>
           <v-btn size="small" @click="vmix.pararCrono()">Stop</v-btn>
+
+          <v-spacer />
+
+          <v-btn
+            size="small"
+            @click="doPreviewCrono"
+            title="Preview"
+            color="primary"
+          >
+            Preview
+          </v-btn>
+
+          <!-- Live: cambia solo estado local -->
+          <v-btn
+            size="small"
+            @click="toggleCronoLive"
+            :color="cronoOnAir ? 'red' : 'green'"
+            variant="flat"
+            :title="cronoOnAir ? 'En programa (Overlay 4)' : 'Live (Overlay 4)'"
+          >
+            {{ cronoOnAir ? 'On Air' : 'Live' }}
+          </v-btn>
         </div>
       </div>
-
     </div>
   </v-container>
 </template>
@@ -137,7 +198,10 @@ import { useTrackingStore } from '@/stores/trackingStore'
 import { useGpxStore } from '@/stores/gpxStore'
 import { usevMixStore } from '@/stores/vMix'
 import { useWaypointsStore } from '@/stores/waypointsStore'
+import { useRunnersStore } from '@/stores/runnersStore'
 import VmixControlMini from '@/components/VmixControlMini.vue'
+import RunnerVmixCard from '@/components/RunnerVmixCard.vue'
+import RunnerHistoryItem from '@/components/RunnerHistoryItem.vue'
 import { formatPace } from '@/utils/geo'
 
 const tracking = useTrackingStore()
@@ -145,6 +209,40 @@ const gpx = useGpxStore()
 const vmix = usevMixStore()
 const waypoints = useWaypointsStore()
 waypoints.load()
+
+// Runners
+
+const runners = useRunnersStore()
+
+const dorsalQuery = ref('')
+const runnerSel = computed(() => {
+  const d = parseInt(dorsalQuery.value, 10)
+  if (!Number.isFinite(d)) return null
+  return runners.list.find(r => Number(r.dorsal) === d) || null
+})
+function searchRunner(){ /* trigger computeds; no hacemos nada más */ }
+
+// Histórico: últimos 10 que salieron a LIVE
+const runnerHistory = ref([]) // [{ id, nombre, dorsal, pais? }]
+
+function onRunnerWentLive(evt) {
+  const r = evt?.runner
+  if (!r || !r.dorsal) return
+  // dedup por dorsal
+  const idx = runnerHistory.value.findIndex(x => Number(x.dorsal) === Number(r.dorsal))
+  if (idx >= 0) runnerHistory.value.splice(idx, 1)
+  runnerHistory.value.unshift({ id: r.id, nombre: r.nombre, dorsal: r.dorsal, pais: r.pais })
+  if (runnerHistory.value.length > 10) runnerHistory.value.length = 10
+}
+
+function onHistoryItemOffAir(h) {
+  // al volver de live, este elemento pasa al primer sitio
+  const idx = runnerHistory.value.findIndex(x => Number(x.dorsal) === Number(h.dorsal))
+  if (idx > 0) {
+    const [item] = runnerHistory.value.splice(idx, 1)
+    runnerHistory.value.unshift(item)
+  }
+}
 
 // Dispositivos
 const deviceItems = computed(() => tracking.list.map(d => ({ title: d.id, value: d.id })))
@@ -200,35 +298,83 @@ const etaStr = computed(() => {
 })
 
 // Distancia al waypoint y marca prevista
-function stableSpeedKmh(d) {
-  const ema = Number(d?.emaSpeed || 0)
-  const avg = Number(d?.avgSpeedKmh || 0)
-  if (ema > 0 && avg > 0) return 0.5 * ema + 0.5 * avg
-  if (avg > 0) return avg
-  return Math.max(0, ema)
-}
-const distToWpKm = computed(() => {
-  const d = dev.value
-  const wp = selectedWp.value
-  if (!d || !wp) return 0
-  return Math.max(0, Number(wp.km || 0) - Number(d.kmRecorridos || 0))
-})
-const distToWpStr = computed(() => `${distToWpKm.value.toFixed(2)} km`)
-const markAtWpStr = computed(() => {
-  const d = dev.value
-  const wp = selectedWp.value
-  if (!d || !wp || !tracking.startTime) return '—'
-  const v = stableSpeedKmh(d)
-  if (v <= 0.5) return '—'
-  const tMs = Math.round((distToWpKm.value / v) * 3600 * 1000)
-  const elapsed = (tracking._nowMs?.() ?? Date.now()) - tracking.startTime
-  const mark = elapsed + tMs
-  const sec = Math.max(0, Math.floor(mark / 1000))
-  const h = String(Math.floor(sec/3600)).padStart(2,'0')
-  const m = String(Math.floor((sec%3600)/60)).padStart(2,'0')
-  const s2 = String(sec%60).padStart(2,'0')
-  return `${h}:${m}:${s2}`
-})
+  function stableSpeedKmh(d) {
+    const ema = Number(d?.emaSpeed || 0)
+    const avg = Number(d?.avgSpeedKmh || 0)
+    if (ema > 0 && avg > 0) return 0.5 * ema + 0.5 * avg
+    if (avg > 0) return avg
+    return Math.max(0, ema)
+  }
+  const distToWpKm = computed(() => {
+    const d = dev.value
+    const wp = selectedWp.value
+    if (!d || !wp) return 0
+    return Math.max(0, Number(wp.km || 0) - Number(d.kmRecorridos || 0))
+  })
+  const distToWpStr = computed(() => `${distToWpKm.value.toFixed(2)} km`)
+  const markAtWpStr = computed(() => {
+    const d = dev.value
+    const wp = selectedWp.value
+    if (!d || !wp || !tracking.startTime) return '—'
+    const v = stableSpeedKmh(d)
+    if (v <= 0.5) return '—'
+    const tMs = Math.round((distToWpKm.value / v) * 3600 * 1000)
+    const elapsed = (tracking._nowMs?.() ?? Date.now()) - tracking.startTime
+    const mark = elapsed + tMs
+    const sec = Math.max(0, Math.floor(mark / 1000))
+    const h = String(Math.floor(sec/3600)).padStart(2,'0')
+    const m = String(Math.floor((sec%3600)/60)).padStart(2,'0')
+    const s2 = String(sec%60).padStart(2,'0')
+    return `${h}:${m}:${s2}`
+  })
+
+  // Crono vMix
+  const cronoOnAir = ref(false)
+
+  async function doPreviewCrono() {
+    try { await vmix.PVWVmix('CRONO') } catch (e) { console.error('Preview CRONO', e) }
+  }
+
+  async function toggleCronoLive() {
+    try {
+      await vmix.liveVmixCrono('CRONO')
+      if (!cronoOnAir.value) {
+        // Solo cuando pasamos a ON AIR disparamos vMix Overlay 4
+        cronoOnAir.value = true
+      } else {
+        // Volvemos a estado verde sin tocar vMix (no hay “Off” a propósito)
+        cronoOnAir.value = false
+      }
+    } catch (e) {
+      console.error('Live CRONO', e)
+    }
+  }
+
+  const dorsalInput = ref('')
+  const corredorOnAir = ref(false)
+
+  const runner = computed(() => {
+    const num = Number(dorsalInput.value)
+    if (!num) return null
+    return runners.list.find(r => r.dorsal === num) || null
+  })
+
+  async function doPreviewCorredor() {
+    try {
+      await vmix.PVWVmix('DSK_CORREDOR')
+    } catch (e) {
+      console.error('Preview corredor', e)
+    }
+  }
+
+  async function toggleCorredorLive() {
+    try {
+      await vmix.liveVmix('DSK_CORREDOR')
+      corredorOnAir.value = !corredorOnAir.value
+    } catch (e) {
+      console.error('Live corredor', e)
+    }
+  }
 
 // Título de métricas
 const metroInput = 'Metro'
@@ -264,7 +410,7 @@ watch(
     dev.value?.etaMs,
     tracking.startTime,
     gpx.totalKm,
-    selectedWpId.value // no enviamos estos al vMix, pero recalculamos UI
+    selectedWpId.value
   ],
   schedulePush,
   { immediate: true }
@@ -285,7 +431,12 @@ async function ping() {
 .stats { display: grid; gap: 4px; font-size: 14px; color: rgba(0,0,0,.8); }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
 .row { display: flex; gap: 8px; align-items: center; }
+
 .right { display: flex; align-items: center; }
 .wp-selector { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 0 10px; }
 .mr-1 { margin-right: 4px; }
+.mt-1 { margin-top: 4px; }
+.mt-2 { margin-top: 8px; }
+.mt-3 { margin-top: 12px; }
+.text-medium-emphasis { opacity: .7; }
 </style>

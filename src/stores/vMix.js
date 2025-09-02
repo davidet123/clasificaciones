@@ -10,6 +10,7 @@ export const usevMixStore = defineStore('vMixStore', {
     // url: "http://192.168.1.153:8088/", 
     url: "http://192.168.50.202:8088/", 
     inicioPartida: null,
+    cronoEnPrograma: false,
     crono: null,
     tiempoPartida: "00:00:00",
     tiempoActual: null,

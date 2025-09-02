@@ -68,7 +68,7 @@ const race = useRaceConfigStore();
 const displayName = (id) => (race.devicesConfig?.[id]?.name?.trim() || id);
 
 const props = defineProps({
-  gpxPath: { type: String, default: '/assets/ruta_casa_1.gpx' },
+  gpxPath: { type: String, default: '/assets/ruta_casa_2.gpx' },
   cpStepMeters: { type: Number, default: undefined }
 });
 

@@ -69,7 +69,7 @@ export const useTrackingStore = defineStore('tracking', {
     async startCronoGlobal() {
       if (!this.startTime) {
         this.startTime = this._nowMs();
-        // >>> inicializa kmStartAtCrono en el primer tick de cada device (ver _applyIncoming)
+        // inicializa kmStartAtCrono en el primer tick de cada device (ver _applyIncoming)
         await this._ensureDvrStarted();
       }
     },
@@ -98,13 +98,18 @@ export const useTrackingStore = defineStore('tracking', {
         d.etaMs = null;
         d.target = { deltaToPBms: null, onTarget: false };
         d.consistency = null;
-        d.status = { offRoute: false, outlierJump: false, frozenEta: false, gapSec: 0, speedFromTrack: false, stationary: false, speedClass: 'auto' };
+        d.status = {
+          offRoute: false, outlierJump: false, frozenEta: false, gapSec: 0,
+          speedFromTrack: false, stationary: false, speedClass: 'auto'
+        };
         d.avgSpeedKmh = null;
         d.slopePct = null;
         d._vEffHist = [];
-        // >>> campos forward / media simple
+        // forward / media simple
         d.kmStartAtCrono = null;
         d.kmMaxForward = 0;
+        d._lastProjIdx = 0;
+        d._offRouteStrikes = 0;
       }
     },
 
@@ -192,19 +197,24 @@ export const useTrackingStore = defineStore('tracking', {
           target: { deltaToPBms: null, onTarget: false },
           personalBest: { pbTimeMs: null, pbDistanceKm: null, targetPaceMinPerKm: null },
           consistency: null,
-          status: { offRoute: false, outlierJump: false, frozenEta: false, gapSec: 0, speedFromTrack: false, stationary: false, speedClass: 'auto' },
+          status: {
+            offRoute: false, outlierJump: false, frozenEta: false, gapSec: 0,
+            speedFromTrack: false, stationary: false, speedClass: 'auto'
+          },
           avgSpeedKmh: null,
           slopePct: null,
           _vEffHist: [],
-          // >>> nuevos
           kmStartAtCrono: null,
           kmMaxForward: 0,
+          _lastProjIdx: 0,
+          _offRouteStrikes: 0,
         };
         this.list.push(d);
       }
 
       d.status.gapSec = d.last?.ts ? (ts - d.last.ts) / 1000 : 0;
 
+      // outlier geométrico
       let outlierJump = false;
       if (d.last?.lat != null && d.last?.lon != null && d.last?.ts) {
         const dt = Math.max(0.001, (ts - d.last.ts) / 1000);
@@ -218,55 +228,92 @@ export const useTrackingStore = defineStore('tracking', {
       const cutoff = ts - this.historyMaxSec * 1000;
       while (d.history.length && d.history[0].ts < cutoff) d.history.shift();
 
-      const proj = progressBetweenCps(lat, lon, gpx.cps, gpx.totalKm, Math.max(0, d.cpIdx - 3));
+      // ===== v efectiva + clasificación por modo =====
+      const gpsSpeedOk = velKmhRaw >= this.minValidGpsSpeedKmh;
+
+      // velocidad de pista con umbrales por modo, se decide después de clasificar, así que primero una estimación preliminar
+      const trackSpeedPre = computeTrackSpeedKmh(d.historyProj, ts, 15, 25, this.minTrackDeltaMeters, this.fallbackMaxJumpKmh);
+
+      // v efectiva preliminar
+      let vEffectiveKmh = gpsSpeedOk ? velKmhRaw : trackSpeedPre;
+
+      pushVEff(d, ts, vEffectiveKmh);
+
+      // clasificación robusta en los últimos 25 s por mediana
+      d.status.speedClass = classifySpeed(d._vEffHist);
+
+      // parámetros por modo
+      const mp = modeParams(d.status.speedClass, gpx.cpStepMeters);
+
+      // recalcular velocidad de pista con ventana por modo
+      const useTrackWindow = (!d.status.offRoute && d.status.gapSec <= mp.gapForTrackSec);
+      const trackSpeedKmh = useTrackWindow
+        ? computeTrackSpeedKmh(d.historyProj, ts, mp.trackWinSecMin, mp.trackWinSecMax, this.minTrackDeltaMeters, this.fallbackMaxJumpKmh)
+        : 0;
+
+      // elegir fuente con histéresis
+      let useTrack = false;
+      if (gpsSpeedOk) {
+        if (d.status.speedFromTrack && velKmhRaw < (this.minValidGpsSpeedKmh + this.hysteresisKmh) && trackSpeedKmh > 0) useTrack = true;
+      } else useTrack = trackSpeedKmh > 0;
+
+      vEffectiveKmh = useTrack ? trackSpeedKmh : (gpsSpeedOk ? velKmhRaw : 0);
+      d.status.speedFromTrack = useTrack;
+
+      // sustituye último punto de hist para coherencia
+      if (d._vEffHist?.length) d._vEffHist[d._vEffHist.length - 1].v = vEffectiveKmh;
+
+      // ===== Proyección sobre GPX con hint desde km forward =====
+      const lastKmFwd = Math.max(0, d.kmMaxForward || 0);
+      // baseIdx a partir de distancia acumulada (no del cpIdx visual)
+      const baseIdx = findCpIdxByKm(gpx.cps, lastKmFwd);
+      // pequeño backtrack para no atascarse en giros
+      const startIdx = Math.max(0, baseIdx - mp.backtrackSegs);
+
+      const proj = progressBetweenCps(lat, lon, gpx.cps, gpx.totalKm, startIdx);
       let kmRaw = proj.kmRecorridos;
       let kmRestRaw = proj.kmRestantes;
 
-      // >>> BLOQUE MONOTONICIDAD DESDE QUE HAY CRONO
+      // Off-route con strikes para no penalizar un tick
+      const offR = proj && typeof proj.distDesdeCPm === 'number'
+        ? (proj.distDesdeCPm < -this.offRouteMaxMeters || proj.distHastaCPm < -this.offRouteMaxMeters)
+        : false;
+      if (offR) d._offRouteStrikes = Math.min(3, (d._offRouteStrikes || 0) + 1);
+      else d._offRouteStrikes = Math.max(0, (d._offRouteStrikes || 0) - 1);
+      d.status.offRoute = d._offRouteStrikes >= 2;
+
+      // Monotonía con tolerancia por modo
       if (this.startTime) {
-        // inicializa kmStartAtCrono en el primer tick con crono activo
         if (d.kmStartAtCrono == null) d.kmStartAtCrono = kmRaw;
-        // monotonicidad forward
+
+        // si el nuevo kmRaw baja un poquito, ignóralo (tolerancia)
+        const backTolKm = mp.backToleranceMeters / 1000;
+        if (d.kmMaxForward != null && kmRaw < d.kmMaxForward && (d.kmMaxForward - kmRaw) <= backTolKm) {
+          kmRaw = d.kmMaxForward;
+        }
         d.kmMaxForward = Math.max(d.kmMaxForward || 0, kmRaw);
         kmRaw = d.kmMaxForward;
         kmRestRaw = Math.max(0, gpx.totalKm - kmRaw);
       } else {
-        // si no hay crono, resetea “forward” para no arrastrar de carreras previas
         d.kmMaxForward = kmRaw;
         d.kmStartAtCrono = null;
       }
-      // <<< FIN BLOQUE MONOTONICIDAD
 
+      // guardar km proyectados
       d.kmRecorridos = kmRaw;
       d.kmRestantes = kmRestRaw;
 
-      d.status.offRoute = proj && typeof proj.distDesdeCPm === 'number'
-        ? (proj.distDesdeCPm < -this.offRouteMaxMeters || proj.distHastaCPm < -this.offRouteMaxMeters)
-        : false;
-
+      // cpIdx solo informativo
       d.cpIdx = findCpIdxByKm(gpx.cps, d.kmRecorridos);
       d.progressPct = gpx.totalKm > 0 ? (d.kmRecorridos / gpx.totalKm) * 100 : 0;
 
       d.historyProj.push({ ts, km: d.kmRecorridos });
       while (d.historyProj.length && d.historyProj[0].ts < cutoff) d.historyProj.shift();
 
-      // Fallback/efectiva (se mantiene igual)
-      const gpsSpeedOk = velKmhRaw >= this.minValidGpsSpeedKmh;
-      const trackSpeedKmh = (!d.status.offRoute && d.status.gapSec <= 3)
-        ? computeTrackSpeedKmh(d.historyProj, ts, this.fallbackWindowSec, this.fallbackMaxWindowSec, this.minTrackDeltaMeters, this.fallbackMaxJumpKmh)
-        : 0;
-      let useTrack = false;
-      if (gpsSpeedOk) {
-        if (d.status.speedFromTrack && velKmhRaw < (this.minValidGpsSpeedKmh + this.hysteresisKmh) && trackSpeedKmh > 0) useTrack = true;
-      } else useTrack = trackSpeedKmh > 0;
+      // ===== Media global basada en crono y km proyectado =====
+      const stationary = isStationary(d.historyProj, ts);
+      d.status.stationary = stationary;
 
-      const vEffectiveKmh = useTrack ? trackSpeedKmh : (gpsSpeedOk ? velKmhRaw : 0);
-      d.status.speedFromTrack = useTrack;
-
-      pushVEff(d, ts, vEffectiveKmh);
-      d.status.speedClass = classifySpeed(d._vEffHist);
-
-      // >>> MEDIA SIMPLE: distancia forward desde kmStartAtCrono / tiempo global
       if (this.startTime && d.kmStartAtCrono != null) {
         const elapsedH = Math.max(0, (ts - this.startTime) / 3600000);
         const distKm = Math.max(0, d.kmRecorridos - d.kmStartAtCrono);
@@ -274,33 +321,27 @@ export const useTrackingStore = defineStore('tracking', {
       } else {
         d.avgSpeedKmh = null;
       }
-      // <<< MEDIA SIMPLE
 
-      // Parado + EMA + ritmo igual que antes
-      const stationary = isStationary(d.historyProj, ts);
-      d.status.stationary = stationary;
-
-      if (!this.startTime && d.cpIdx >= 1) {
-        this.startTime = this._nowMs();
-        // al arrancar así, fija kmStartAtCrono para todos en su primer tick
-        this._ensureDvrStarted();
-      } else {
-        if (d.kmRecorridos >= gpx.totalKm - 1e-6) this.stopCrono();
-      }
-
+      // Pendiente con parámetros por modo
       d.slopePct = (!d.status.offRoute)
         ? computeImmediateSlopePct(d.history, d.historyProj, gpx.cps, {
-            minM: this.slopeMinMeters, maxM: this.slopeMaxMeters, maxSec: this.slopeMaxSeconds, clamp: this.slopeClampPct
+            minM: mp.slopeMinM,
+            maxM: mp.slopeMaxM,
+            maxSec: mp.slopeMaxSec,
+            clamp: this.slopeClampPct
           })
         : d.slopePct;
 
-      const alpha = stationary ? Math.min(0.6, this.emaAlphaSpeed * 2.2) : this.emaAlphaSpeed;
+      // EMA de velocidad ajustada por modo (más reactiva en bike)
+      const alpha = stationary ? Math.min(0.6, mp.emaAlpha * 2.0) : mp.emaAlpha;
       if (d.emaSpeed == null) d.emaSpeed = vEffectiveKmh;
       d.emaSpeed = alpha * vEffectiveKmh + (1 - alpha) * d.emaSpeed;
 
+      // Ritmo
       if (!this.startTime || vEffectiveKmh < 1.2) d.paceAvgMinPerKm = null;
       else d.paceAvgMinPerKm = kmhToPaceMinPerKm(d.emaSpeed);
 
+      // ETA
       const armed = (d.kmRecorridos / gpx.totalKm) >= this.etaStartPercent;
       d.etaArmed = armed;
       if (armed) {
@@ -320,6 +361,7 @@ export const useTrackingStore = defineStore('tracking', {
         d.status.frozenEta = false;
       }
 
+      // PB / objetivo
       updatePersonalBestTarget(d, gpx.totalKm);
       if (d.personalBest?.pbTimeMs && d.etaArmed && Number.isFinite(d.etaMs)) {
         const pbAdjMs = d.personalBest.pbTimeMs * (gpx.totalKm / (d.personalBest.pbDistanceKm || gpx.totalKm));
@@ -388,6 +430,7 @@ export const useTrackingStore = defineStore('tracking', {
 });
 
 /* ===== Helpers ===== */
+
 function findCpIdxByKm(cps, km) {
   let lo = 0, hi = cps.length - 2;
   if (km <= cps[0].kmAcc) return 0;
@@ -399,88 +442,18 @@ function findCpIdxByKm(cps, km) {
   }
   return Math.max(0, Math.min(cps.length - 2, lo));
 }
-function robustSpeedKmh(ema, avgRecent) {
-  if (avgRecent > 0 && ema > 0) return 0.5 * ema + 0.5 * avgRecent;
-  if (avgRecent > 0) return avgRecent;
-  return Math.max(0, ema || 0);
+
+function pushVEff(d, ts, v) {
+  if (!Array.isArray(d._vEffHist)) d._vEffHist = [];
+  d._vEffHist.push({ ts, v });
+  const cutoff = ts - 25000; // 25 s para clasificar
+  while (d._vEffHist.length && d._vEffHist[0].ts < cutoff) d._vEffHist.shift();
 }
-function computeConsistency(historyProj) {
-  if (!Array.isArray(historyProj) || historyProj.length < 3) return null;
-  const targetKm = 0.2;
-  const buckets = [];
-  let accStart = historyProj[0].km;
-  let tStart = historyProj[0].ts;
-  for (let i = 1; i < historyProj.length; i++) {
-    const a = historyProj[i - 1], b = historyProj[i];
-    const dk = b.km - a.km;
-    const dt = b.ts - a.ts;
-    if (dt <= 0 || dk <= 0) continue;
-    if ((b.km - accStart) >= targetKm) {
-      const segKm = b.km - accStart;
-      const segMs = b.ts - tStart;
-      const vKmh = segMs > 0 ? (segKm / (segMs / 3600000)) : 0;
-      const paceMin = kmhToPaceMinPerKm(vKmh);
-      if (paceMin && paceMin > 0) buckets.push(paceMin * 60);
-      accStart = b.km; tStart = b.ts;
-    }
-  }
-  if (buckets.length < 4) return null;
-  buckets.sort((a, b) => a - b);
-  const qLo = buckets[Math.floor(buckets.length * 0.1)];
-  const qHi = buckets[Math.floor(buckets.length * 0.9)];
-  const trimmed = buckets.filter(x => x >= qLo && x <= qHi);
-  if (trimmed.length < 3) return null;
-  const median = trimmed[Math.floor(trimmed.length / 2)];
-  const deviations = trimmed.map(x => Math.abs(x - median)).sort((a, b) => a - b);
-  const mad = deviations[Math.floor(deviations.length / 2)];
-  const stdEq = 1.4826 * mad;
-  const label =
-    stdEq <= 6 ? 'muy constante' :
-    stdEq <= 10 ? 'constante' :
-    stdEq <= 18 ? 'variable' : 'muy variable';
-  return { paceStdSec: stdEq, paceVarLabel: label };
-}
-function updatePersonalBestTarget(d, gpxTotalKm) {
-  const pbMs = d.personalBest?.pbTimeMs;
-  const pbKm = d.personalBest?.pbDistanceKm || gpxTotalKm || 0;
-  if (!pbMs || !pbKm) {
-    d.personalBest = d.personalBest || {};
-    d.personalBest.targetPaceMinPerKm = null;
-    return;
-  }
-  const paceMinPerKm = (pbMs / 60000) / pbKm;
-  d.personalBest.targetPaceMinPerKm = paceMinPerKm;
-}
-function computeTrackSpeedKmh(historyProj, nowTs, minWinSec, maxWinSec, minDeltaMeters, maxClampKmh) {
-  if (!Array.isArray(historyProj) || historyProj.length < 2) return 0;
-  const last = historyProj[historyProj.length - 1];
-  let pick = null;
-  for (let i = historyProj.length - 2; i >= 0; i--) {
-    const p = historyProj[i];
-    const ageSec = (nowTs - p.ts) / 1000;
-    if (ageSec >= minWinSec && ageSec <= maxWinSec) { pick = p; break; }
-    if (ageSec > maxWinSec) break;
-  }
-  if (!pick) {
-    for (let i = 0; i < historyProj.length - 1; i++) {
-      const p = historyProj[i];
-      const ageSec = (nowTs - p.ts) / 1000;
-      if (ageSec <= maxWinSec) { pick = p; break; }
-    }
-  }
-  if (!pick) return 0;
-  const deltaKm = Math.max(0, last.km - pick.km);
-  const deltaH = Math.max(0, (last.ts - pick.ts) / 3600000);
-  const meters = deltaKm * 1000;
-  if (!isFinite(deltaH) || deltaH <= 0) return 0;
-  if (meters < minDeltaMeters) return 0;
-  const v = deltaKm / deltaH;
-  if (!isFinite(v) || v < 0) return 0;
-  return Math.min(v, maxClampKmh);
-}
+
+// Clasificación robusta por mediana
 function classifySpeed(vHist) {
   if (!Array.isArray(vHist) || vHist.length === 0) return 'auto';
-  const speeds = vHist.map(x => x.v).filter(Number.isFinite);
+  const speeds = vHist.map(x => x.v).filter(Number.isFinite).filter(v => v >= 0);
   if (!speeds.length) return 'auto';
   speeds.sort((a, b) => a - b);
   const med = speeds[Math.floor(speeds.length / 2)];
@@ -489,11 +462,54 @@ function classifySpeed(vHist) {
   if (med < 18) return 'run';
   return 'bike';
 }
-function pushVEff(d, ts, v) {
-  d._vEffHist.push({ ts, v });
-  const cutoff = ts - 25000;
-  while (d._vEffHist.length && d._vEffHist[0].ts < cutoff) d._vEffHist.shift();
+
+// Parámetros por modo
+function modeParams(mode, cpStepMeters) {
+  const step = Math.max(1, cpStepMeters || 10);
+  switch (mode) {
+    case 'walk':
+      return {
+        backtrackSegs: 3,
+        backToleranceMeters: 12,
+        emaAlpha: 0.20,
+        gapForTrackSec: 8,
+        trackWinSecMin: 12,
+        trackWinSecMax: 20,
+        slopeMinM: 12,
+        slopeMaxM: 18,
+        slopeMaxSec: 15,
+        effStepM: Math.max(step, 10),
+      };
+    case 'run':
+      return {
+        backtrackSegs: 3,
+        backToleranceMeters: 8,
+        emaAlpha: 0.25,
+        gapForTrackSec: 10,
+        trackWinSecMin: 12,
+        trackWinSecMax: 20,
+        slopeMinM: 15,
+        slopeMaxM: 20,
+        slopeMaxSec: 15,
+        effStepM: Math.max(step, 10),
+      };
+    case 'bike':
+    default:
+      return {
+        backtrackSegs: 4,
+        backToleranceMeters: 5,
+        emaAlpha: 0.32,
+        gapForTrackSec: 12,
+        trackWinSecMin: 15,
+        trackWinSecMax: 25,
+        slopeMinM: 18,
+        slopeMaxM: 25,
+        slopeMaxSec: 15,
+        effStepM: Math.max(step, 12),
+      };
+  }
 }
+
 function isStationary(historyProj, nowTs) {
   if (!Array.isArray(historyProj) || historyProj.length < 2) return false;
   const last = historyProj[historyProj.length - 1];
@@ -506,6 +522,45 @@ function isStationary(historyProj, nowTs) {
   const deltaM = Math.max(0, (last.km - first.km) * 1000);
   return deltaM < 10;
 }
+
+function computeTrackSpeedKmh(historyProj, nowTs, minWinSec, maxWinSec, minDeltaMeters, maxClampKmh) {
+  if (!Array.isArray(historyProj) || historyProj.length < 2) return 0;
+  const last = historyProj[historyProj.length - 1];
+
+  // pick dentro de ventana [min, max]
+  let pick = null;
+  for (let i = historyProj.length - 2; i >= 0; i--) {
+    const p = historyProj[i];
+    const ageSec = (nowTs - p.ts) / 1000;
+    if (ageSec >= minWinSec && ageSec <= maxWinSec) { pick = p; break; }
+    if (ageSec > maxWinSec) break;
+  }
+  if (!pick) {
+    // fallback: más antiguo dentro de maxWinSec
+    for (let i = 0; i < historyProj.length - 1; i++) {
+      const p = historyProj[i];
+      const ageSec = (nowTs - p.ts) / 1000;
+      if (ageSec <= maxWinSec) { pick = p; break; }
+    }
+  }
+  if (!pick) return 0;
+
+  const deltaKm = Math.max(0, last.km - pick.km);
+  const deltaH = Math.max(0, (last.ts - pick.ts) / 3600000);
+  const meters = deltaKm * 1000;
+  if (!isFinite(deltaH) || deltaH <= 0) return 0;
+  if (meters < minDeltaMeters) return 0;
+  const v = deltaKm / deltaH;
+  if (!isFinite(v) || v < 0) return 0;
+  return Math.min(v, maxClampKmh);
+}
+
+function robustSpeedKmh(ema, avgRecent) {
+  if (avgRecent > 0 && ema > 0) return 0.5 * ema + 0.5 * avgRecent;
+  if (avgRecent > 0) return avgRecent;
+  return Math.max(0, ema || 0);
+}
+
 function computeImmediateSlopePct(history, historyProj, cps, opts) {
   const minM = Math.max(10, opts?.minM ?? 15);
   const maxM = Math.max(minM, opts?.maxM ?? 20);
@@ -561,6 +616,57 @@ function computeImmediateSlopePct(history, historyProj, cps, opts) {
 
   return slope != null ? clamp(slope, -clampAbs, clampAbs) : null;
 }
+
+function computeConsistency(historyProj) {
+  if (!Array.isArray(historyProj) || historyProj.length < 3) return null;
+  const targetKm = 0.2;
+  const buckets = [];
+  let accStart = historyProj[0].km;
+  let tStart = historyProj[0].ts;
+  for (let i = 1; i < historyProj.length; i++) {
+    const a = historyProj[i - 1], b = historyProj[i];
+    const dk = b.km - a.km;
+    const dt = b.ts - a.ts;
+    if (dt <= 0 || dk <= 0) continue;
+    if ((b.km - accStart) >= targetKm) {
+      const segKm = b.km - accStart;
+      const segMs = b.ts - tStart;
+      const vKmh = segMs > 0 ? (segKm / (segMs / 3600000)) : 0;
+      const paceMin = kmhToPaceMinPerKm(vKmh);
+      if (paceMin && paceMin > 0) buckets.push(paceMin * 60);
+      accStart = b.km; tStart = b.ts;
+    }
+  }
+  if (buckets.length < 4) return null;
+  buckets.sort((a, b) => a - b);
+  const qLo = buckets[Math.floor(buckets.length * 0.1)];
+  const qHi = buckets[Math.floor(buckets.length * 0.9)];
+  const trimmed = buckets.filter(x => x >= qLo && x <= qHi);
+  if (trimmed.length < 3) return null;
+  const median = trimmed[Math.floor(trimmed.length / 2)];
+  const deviations = trimmed.map(x => Math.abs(x - median)).sort((a, b) => a - b);
+  const mad = deviations[Math.floor(deviations.length / 2)];
+  const stdEq = 1.4826 * mad;
+  const label =
+    stdEq <= 6 ? 'muy constante' :
+    stdEq <= 10 ? 'constante' :
+    stdEq <= 18 ? 'variable' : 'muy variable';
+  return { paceStdSec: stdEq, paceVarLabel: label };
+}
+
+function updatePersonalBestTarget(d, gpxTotalKm) {
+  const pbMs = d.personalBest?.pbTimeMs;
+  const pbKm = d.personalBest?.pbDistanceKm || gpxTotalKm || 0;
+  if (!pbMs || !pbKm) {
+    d.personalBest = d.personalBest || {};
+    d.personalBest.targetPaceMinPerKm = null;
+    return;
+  }
+  const paceMinPerKm = (pbMs / 60000) / pbKm;
+  d.personalBest.targetPaceMinPerKm = paceMinPerKm;
+}
+
+/* ===== Helpers de tiempo ===== */
 export function msToHMS(ms) {
   const v = Number(ms);
   if (!isFinite(v) || v < 0) return '00:00:00';
@@ -580,4 +686,5 @@ export function parseHMSToMs(str) {
   else if (parts.length === 1) ss = parts[0];
   return ((hh * 3600) + (mm * 60) + ss) * 1000;
 }
+
 function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }

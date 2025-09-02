@@ -106,7 +106,7 @@ const race = useRaceConfigStore();
 const displayName = (id) => (race.devicesConfig?.[id]?.name?.trim() || id);
 
 const props = defineProps({
-  gpxPath: { type: String, default: '/assets/ruta_casa_1.gpx' },
+  gpxPath: { type: String, default: '/assets/ruta_marxuquera_1.gpx' },
   cpStepMeters: { type: Number, default: undefined }
 });
 
@@ -350,6 +350,8 @@ onMounted(async () => {
 
   await gpx.loadFromPublic(props.gpxPath, props.cpStepMeters);
   drawTrack();
+
+  tracking.setTimeSource(() => replay.tPlay ?? Date.now());
 
   intervalId = setInterval(refreshDevicesOnMap, 500);
   rafId = requestAnimationFrame(tickAnim);

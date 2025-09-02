@@ -82,35 +82,35 @@
           <VmixControlMini
             label="Dist. Restante"
             :input="metroInput"
-            field="DistRest"
+            field="Velocidad"
             :value="restanteStr"
             :overlay="2"
           />
           <VmixControlMini
             label="Velocidad media"
-            :input="metroInput"
-            field="VelMedia"
+            :input="'Velocidad_media'"
+            field="Velocidad"
             :value="velMediaStr"
-            :overlay="3"
+            :overlay="2"
           />
           <VmixControlMini
             label="Ritmo"
-            :input="metroInput"
-            field="Ritmo"
+            :input="'RITMO'"
+            field="Velocidad"
             :value="ritmoStr"
             :overlay="4"
           />
           <VmixControlMini
             label="Pendiente"
-            :input="metroInput"
-            field="Pendiente"
+            :input="'Pendiente'"
+            field="Velocidad"
             :value="pendienteStr"
             :overlay="5"
           />
           <VmixControlMini
             label="ETA total"
-            :input="metroInput"
-            field="ETA"
+            :input="'ETA'"
+            field="Velocidad"
             :value="etaStr"
             :overlay="6"
           />
@@ -382,13 +382,13 @@ const metroInput = 'Metro'
 // Autoenvío a vMix (mantenemos lo existente)
 function pushAllToVmix() {
   if (!dev.value) return
-  vmix.setTextCached(metroInput, 'Velocidad', velInstStr.value)
-  vmix.setTextCached(metroInput, 'VelMedia', velMediaStr.value)
-  vmix.setTextCached(metroInput, 'Km', kmStr.value)
-  vmix.setTextCached(metroInput, 'DistRest', restanteStr.value)
-  vmix.setTextCached(metroInput, 'Ritmo', ritmoStr.value)
-  vmix.setTextCached(metroInput, 'Pendiente', pendienteStr.value)
-  vmix.setTextCached(metroInput, 'ETA', etaStr.value)
+  vmix.setTextCached('Velocidad', 'Velocidad', velInstStr.value)
+  vmix.setTextCached('Velocidad_media', 'Velocidad', velMediaStr.value)
+  vmix.setTextCached(metroInput, 'Velocidad', kmStr.value)
+  vmix.setTextCached(metroInput, 'Velocidad', restanteStr.value)
+  vmix.setTextCached(metroInput, 'Velocidad', ritmoStr.value)
+  vmix.setTextCached('Pendiente', 'Velocidad', pendienteStr.value)
+  vmix.setTextCached('Eta', 'Velocidad', etaStr.value)
 }
 
 let rafToken = null

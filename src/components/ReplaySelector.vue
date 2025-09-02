@@ -57,6 +57,7 @@ async function loadList() {
 function selectReplay(rep) {
   console.log(rep)
   replayStore.setReplay(rep); // 🔹 usamos manifest completo
+  replayStore.play()
 }
 
 onMounted(loadList);

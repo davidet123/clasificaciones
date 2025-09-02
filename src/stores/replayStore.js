@@ -52,6 +52,7 @@ export const useReplayStore = defineStore('replay', {
 
     // Último replay seleccionado (mínimo {date, raceId})
     selected: null,
+    
   }),
 
   getters: {
@@ -84,12 +85,66 @@ export const useReplayStore = defineStore('replay', {
     /* ============================
      * NUEVO: selección desde ReplaySelector
      * ============================ */
-    async setReplay(rep) {
-      // rep viene del selector: { date, raceId }
-      if (!rep || !rep.date || !rep.raceId) return;
-      this.selected = { date: rep.date, raceId: rep.raceId };
-      await this.loadFromManifest(rep.date, rep.raceId);
+    // Dentro de actions{} de replayStore
+    async setReplay(manifest) {
+      // manifest esperado: { date, raceId, t0, tEnd, devices: [uniqueId,...] }
+      try {
+        // Limpieza y parada por si había algo en marcha
+        this.stop();
+        this.buffers = {};
+        this.idxById = {};
+        this.t0 = null;
+        this.tEnd = null;
+        this.tPlay = null;
+        this.playing = false;
+        this.paused = false;
+        this.speed = 1;
+        this.loop = false;
+        this.selected = manifest || null;
+
+        if (!manifest || !manifest.date || !manifest.raceId || !Array.isArray(manifest.devices) || !manifest.devices.length) {
+          console.warn('[replay] Manifest incompleto', manifest);
+          return;
+        }
+
+        // Tiempos absolutos del replay (ms epoch)
+        this.t0 = Number(manifest.t0) || null;
+        this.tEnd = Number(manifest.tEnd) || null;
+        if (!(Number.isFinite(this.t0) && Number.isFinite(this.tEnd) && this.tEnd > this.t0)) {
+          console.warn('[replay] t0/tEnd inválidos en manifest; abortando carga');
+          return;
+        }
+
+        // De momento reproducimos el primer device de la lista
+        const deviceId = String(manifest.devices[0]);
+
+        // Construye URL NDJSON con el rango exacto del manifest
+        const fromIso = new Date(this.t0).toISOString();
+        const toIso   = new Date(this.tEnd).toISOString();
+        const qs = new URLSearchParams({
+          date: manifest.date,
+          raceId: manifest.raceId,
+          device: deviceId,
+          from: fromIso,
+          to: toIso,
+        });
+        const url = `/replay/ndjson?${qs.toString()}`;
+
+        // Carga NDJSON -> rellena this.buffers, idxById, t0, tEnd, tPlay...
+        await this.loadNdjsonFromUrl(url, { label: `${manifest.date}/${manifest.raceId}/${deviceId}` });
+
+        // Fija reloj de reproducción al inicio del rango
+        this.tPlay = this.t0;
+
+        // OJO: aquí NO arrancamos nada. El scheduler va con play() -> _tick()
+        // Si quieres auto-play tras seleccionar, hazlo en la UI: replay.play();
+
+        console.log('[replay] Manifest cargado y NDJSON listo:', deviceId, new Date(this.t0), new Date(this.tEnd));
+      } catch (e) {
+        console.error('[replay] setReplay error', e);
+      }
     },
+
 
     async loadFromManifest(date, raceId) {
       this.resetAll();

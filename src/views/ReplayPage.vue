@@ -2,6 +2,9 @@
   <div class="mapa-carrera">
     <div id="map" class="map"></div>
 
+    <!-- Selector de replay por encima del mapa -->
+    <ReplaySelector class="replay-selector" />
+
     <!-- Botón para ir al perfil (página nueva) -->
     <v-btn
       icon="mdi-chart-areaspline"
@@ -88,7 +91,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref, onBeforeUnmount, computed } from 'vue';
+import { onMounted, ref, onBeforeUnmount, computed, watch } from 'vue';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { useGpxStore } from '@/stores/gpxStore';
@@ -97,12 +100,13 @@ import { useReplayStore } from '@/stores/replayStore';
 import { formatPace } from '@/utils/geo';
 import SidebarAjustes from '@/components/SidebarAjustes.vue';
 import { useRaceConfigStore } from '@/stores/raceConfigStore';
+import ReplaySelector from '@/components/ReplaySelector.vue';
 
 const race = useRaceConfigStore();
 const displayName = (id) => (race.devicesConfig?.[id]?.name?.trim() || id);
 
 const props = defineProps({
-  gpxPath: { type: String, default: '/assets/ruta_apunt_1.gpx' },
+  gpxPath: { type: String, default: '/assets/ruta_casa_1.gpx' },
   cpStepMeters: { type: Number, default: undefined }
 });
 
@@ -118,6 +122,8 @@ const deviceLayers = new Map();
 const animState = new Map();
 let rafId = null;
 let intervalId = null;
+
+const loading = ref(false);
 
 const totalKm = computed(() => Number(gpx.totalKm || 0).toFixed(2));
 
@@ -162,7 +168,7 @@ function buildPopupContent(d) {
   const container = document.createElement('div');
 
   const b = document.createElement('b');
-  b.textContent = displayName(d.id); // ⬅️ cambio: nombre visible
+  b.textContent = displayName(d.id);
   container.appendChild(b);
   container.appendChild(document.createElement('br'));
 
@@ -175,7 +181,7 @@ function buildPopupContent(d) {
   container.appendChild(pace);
 
   const km = document.createElement('div');
-  km.textContent = `Km: ${d.progress?.km?.toFixed(2) ?? '0.00'} / ${totalKm.value}`;
+  km.textContent = `Km: ${(d.kmRecorridos ?? 0).toFixed(2)} / ${totalKm.value}`;
   container.appendChild(km);
 
   const eta = document.createElement('div');
@@ -239,9 +245,8 @@ function refreshDevicesOnMap() {
  * Replay controls
  * =======================*/
 const source = ref('ndjson'); // 'ndjson' | 'kml'
-const loading = ref(false);
 
-// NDJSON params
+// NDJSON params manuales
 const ndDate = ref('');
 const ndRaceId = ref('');
 const ndDevice = ref('');
@@ -293,10 +298,16 @@ async function loadNdjson() {
   }
 }
 
+/* === Reaccionar cuando el store tenga datos cargados (tras seleccionar en ReplaySelector) === */
+watch(
+  () => replay.hasData,
+  (has) => { if (has) centerToFirst(); }
+);
+
 function centerToFirst() {
   const ids = replay.deviceIds;
   if (ids.length) {
-    const first = tracking.devices?.[ids[0]]?.last;
+    const first = tracking.byId?.[ids[0]]?.last;
     if (first) { map.setView([first.lat, first.lon], 15); }
   }
 }
@@ -361,11 +372,20 @@ onBeforeUnmount(() => {
 .sidebar-toggle { position: absolute; right: 16px; top: 16px; z-index: 400; }
 .profile-toggle { position: absolute; right: 72px; top: 16px; z-index: 400; }
 
+/* Asegura que el selector quede por encima del mapa */
+.replay-selector {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 1100;
+  pointer-events: auto;
+}
+
 .replay-controls {
   position: absolute;
   left: 16px;
   bottom: 16px;
-  z-index: 450;
+  z-index: 1050;
   display: flex;
   gap: 6px;
   align-items: center;

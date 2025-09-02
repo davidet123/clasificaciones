@@ -15,11 +15,14 @@ export const useGpxStore = defineStore('gpx', {
     // Checkpoints para cálculo
     cps: [],         // [{lat, lon, ele, kmAcc}]
     cpStepMeters: 50,
-    name: 'Ruta GPX'
+    name: 'Ruta GPX',
+
+    // Añadido: última ruta cargada para prefill en UI
+    currentPath: '',
   }),
   actions: {
     // async loadFromPublic(path = '/assets/gran-fondo-de-siete-aguas.gpx', stepMeters) {
-    async loadFromPublic(path = '/assets/ruta.gpx', stepMeters) {
+    async loadFromPublic(path = '/assets/ruta_casa_1.gpx', stepMeters) {
       try {
         this.loading = true; this.error = null;
 
@@ -58,6 +61,7 @@ export const useGpxStore = defineStore('gpx', {
         this.cpStepMeters = step;
 
         this.loaded = true;
+        this.currentPath = String(path || '');
       } catch (e) {
         console.error('[GPX load error]', e);
         this.error = e.message || String(e);

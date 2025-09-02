@@ -8,6 +8,9 @@ export const useRaceConfigStore = defineStore('raceConfig', {
   state: () => ({
     // URL editable de vMix (se refleja también en usevMixStore().url)
     vmixUrl: '',
+    // GPX
+    gpxPath: '',                 // ruta GPX seleccionada
+    recentGpxPaths: [],          // historial simple para el select
     // Mapa id -> { name, category }
     // category ∈ {'Masculina','Femenina','Otro'}
     devicesConfig: {},
@@ -46,6 +49,8 @@ export const useRaceConfigStore = defineStore('raceConfig', {
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object') {
           if (typeof parsed.vmixUrl === 'string') this.vmixUrl = parsed.vmixUrl;
+          if (typeof parsed.gpxPath === 'string') this.gpxPath = parsed.gpxPath;
+          if (Array.isArray(parsed.recentGpxPaths)) this.recentGpxPaths = parsed.recentGpxPaths.slice(0, 10);
           if (parsed.devicesConfig && typeof parsed.devicesConfig === 'object') {
             this.devicesConfig = { ...parsed.devicesConfig };
           }
@@ -59,6 +64,8 @@ export const useRaceConfigStore = defineStore('raceConfig', {
           LS_KEY,
           JSON.stringify({
             vmixUrl: this.vmixUrl || '',
+            gpxPath: this.gpxPath || '',
+            recentGpxPaths: this.recentGpxPaths || [],
             devicesConfig: this.devicesConfig || {},
           })
         );
@@ -73,6 +80,18 @@ export const useRaceConfigStore = defineStore('raceConfig', {
         const vmix = usevMixStore();
         vmix.url = url;
       } catch {/* si no está creado aún, no pasa nada */}
+      this.saveToStorage();
+    },
+
+    // GPX
+    setGpxPath(pathStr) {
+      const p = String(pathStr || '').trim();
+      this.gpxPath = p;
+      if (p) {
+        const arr = this.recentGpxPaths.filter(x => x !== p);
+        arr.unshift(p);
+        this.recentGpxPaths = arr.slice(0, 10);
+      }
       this.saveToStorage();
     },
 

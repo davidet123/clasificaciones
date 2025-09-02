@@ -1,6 +1,7 @@
 // src/boot/appBootstrap.js
 import { useGpxStore } from '@/stores/gpxStore';
 import { useTrackingStore } from '@/stores/trackingStore';
+import { useRaceConfigStore } from '@/stores/raceConfigStore';
 
 let started = false;
 let reconnectTimer = null;
@@ -11,24 +12,23 @@ export function startAppBootstrap() {
 
   const gpx = useGpxStore();
   const tracking = useTrackingStore();
+  const race = useRaceConfigStore();
 
-  // 1) Cargar GPX por defecto si no está cargado
+  // 0) Cargar configuración (para leer gpxPath)
+  try { race.init(); } catch {}
+
+  // 1) Cargar GPX por defecto o el configurado
   try {
+    const chosen = race.gpxPath && race.gpxPath.trim();
     if (!gpx.loaded && !gpx.loading) {
-      // Respeta tu API existente: si tenías otra ruta/params, cámbialo aquí
-      gpx.loadFromPublic().catch(() => {});
+      if (chosen) gpx.loadFromPublic(chosen).catch(() => {});
+      else gpx.loadFromPublic().catch(() => {});
     }
-  } catch {
-    // silencioso
-  }
+  } catch {/* silencioso */}
 
   // 2) Conectar WS si no hay uno activo
   const WS_URL = import.meta.env?.VITE_LIVE_WS_URL || 'ws://localhost:3000';
-  try {
-    tracking.connectWS?.(WS_URL);
-  } catch {
-    // silencioso
-  }
+  try { tracking.connectWS?.(WS_URL); } catch {}
 
   // 3) Reintento suave si se cae el WS
   const loop = () => {

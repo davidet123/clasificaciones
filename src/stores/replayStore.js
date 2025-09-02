@@ -49,6 +49,9 @@ export const useReplayStore = defineStore('replay', {
     // Info de fuente (para UI)
     source: null,      // 'ndjson' | 'kml'
     meta: null,        // datos auxiliares (date, raceId, device, fileName, etc.)
+
+    // Último replay seleccionado (mínimo {date, raceId})
+    selected: null,
   }),
 
   getters: {
@@ -79,12 +82,89 @@ export const useReplayStore = defineStore('replay', {
     },
 
     /* ============================
+     * NUEVO: selección desde ReplaySelector
+     * ============================ */
+    async setReplay(rep) {
+      // rep viene del selector: { date, raceId }
+      if (!rep || !rep.date || !rep.raceId) return;
+      this.selected = { date: rep.date, raceId: rep.raceId };
+      await this.loadFromManifest(rep.date, rep.raceId);
+    },
+
+    async loadFromManifest(date, raceId) {
+      this.resetAll();
+      const absManUrl = `http://localhost:3000/replays/${encodeURIComponent(date)}/${encodeURIComponent(raceId)}/manifest.json`;
+      try {
+        // 1) Intento con manifest.json
+        const manRes = await fetch(absManUrl);
+        if (!manRes.ok) throw new Error(`Manifest HTTP ${manRes.status}`);
+        const manifest = await manRes.json();
+
+        const t0ms = Number(manifest.t0);
+        const tEndms = Number(manifest.tEnd);
+        if (!Number.isFinite(t0ms) || !Number.isFinite(tEndms) || tEndms <= t0ms) {
+          throw new Error('Manifest sin rango temporal válido');
+        }
+
+        // devices del manifest o fallback a /replay/devices
+        let devices = Array.isArray(manifest.devices) ? manifest.devices : [];
+        if (!devices.length) {
+          const devQs = new URLSearchParams({ date, raceId });
+          const devRes = await fetch(`http://localhost:3000/replay/devices?${devQs.toString()}`);
+          if (!devRes.ok) throw new Error(`Devices HTTP ${devRes.status}`);
+          devices = await devRes.json();
+        }
+        if (!Array.isArray(devices) || !devices.length) throw new Error('No hay dispositivos en el replay');
+
+        const device = String(devices[0]);
+        const fromIso = new Date(t0ms).toISOString();
+        const toIso = new Date(tEndms).toISOString();
+
+        const qs = new URLSearchParams({ date, raceId, device, from: fromIso, to: toIso });
+        const ndjsonUrl = `/replay/ndjson?${qs.toString()}`;
+        await this.loadNdjsonFromUrl(ndjsonUrl, { label: `${date}/${raceId}/${device}` });
+        this.meta = { date, raceId, device, manifestUrl: absManUrl };
+      } catch (e) {
+        console.warn('[replay] manifest no disponible, usando fallback total:', e?.message || e);
+
+        // 2) Fallback sin manifest: obtener devices y pedir TODO el ndjson
+        try {
+          const devQs = new URLSearchParams({ date, raceId });
+          const devRes = await fetch(`http://localhost:3000/replay/devices?${devQs.toString()}`);
+          if (!devRes.ok) throw new Error(`Devices HTTP ${devRes.status}`);
+          const devices = await devRes.json();
+          if (!Array.isArray(devices) || !devices.length) throw new Error('No hay dispositivos en el replay');
+
+          const device = String(devices[0]);
+          // rango amplio para recuperar todo; el parser calcula t0/tEnd
+          const qs = new URLSearchParams({
+            date, raceId, device,
+            from: '1970-01-01T00:00:00.000Z',
+            to:   '2100-01-01T00:00:00.000Z'
+          });
+          const ndjsonUrl = `/replay/ndjson?${qs.toString()}`;
+          await this.loadNdjsonFromUrl(ndjsonUrl, { label: `${date}/${raceId}/${device}` });
+          this.meta = { date, raceId, device, manifestUrl: null };
+        } catch (e2) {
+          console.error('[replay] fallback total también falló:', e2);
+          this.resetAll();
+          throw e2;
+        }
+      }
+    },
+
+    /* ============================
      * CARGA DE NDJSON (bridge)
      * ============================ */
     async loadNdjsonFromUrl(url, { label = null } = {}) {
-      this.resetAll();
+      this.stop(); // por si estaba reproduciendo
+      this.buffers = {};
+      this.idxById = {};
+      this.t0 = this.tEnd = this.tPlay = null;
+      this.source = null;
+      this.meta = null;
 
-      // Carga completa en memoria (simple y robusto). Si el fichero es gigantesco, ya optimizamos.
+      // Carga completa en memoria (simple y robusto)
       const resp = await fetch(url);
       if (!resp.ok) throw new Error(`NDJSON HTTP ${resp.status}`);
       const text = await resp.text();
@@ -260,14 +340,12 @@ export const useReplayStore = defineStore('replay', {
       else this.tPlay = Math.min(this.tEnd ?? this.tPlay, this.tPlay + dtMs);
 
       // Emitir todos los puntos con ts <= tPlay
-      let anyPending = false;
       for (const id of Object.keys(this.buffers)) {
         const arr = this.buffers[id];
         let idx = this.idxById[id] ?? 0;
         while (idx < arr.length && arr[idx].ts <= this.tPlay) {
           this._emitPoint(arr[idx]);
           idx++;
-          anyPending = true;
         }
         this.idxById[id] = idx;
       }
@@ -293,18 +371,15 @@ export const useReplayStore = defineStore('replay', {
       if (!this._tracking) return;
       // Inyecta en tracking como si fuera live
       try {
-        // Si tu trackingStore expone ingestReplayPoint(id, datos), úsalo:
         if (typeof this._tracking.ingestReplayPoint === 'function') {
           this._tracking.ingestReplayPoint(p.id, {
             lat: p.lat, lon: p.lon,
             velocidad: Number.isFinite(p.speedKmh) ? p.speedKmh : 0,
             altitud: Number.isFinite(p.alt) ? p.alt : 0,
             direccion: Number.isFinite(p.course) ? p.course : 0,
-            // opcional: si tu tracking lee ts de aquí, lo mandamos
             ts: p.ts
           });
         } else if (typeof this._tracking._applyIncoming === 'function') {
-          // Ruta “cruda” si hiciera falta
           this._tracking._applyIncoming({
             identificador: p.id,
             datos: {

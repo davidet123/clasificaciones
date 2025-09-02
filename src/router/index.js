@@ -49,6 +49,11 @@ const router = createRouter({
       name: 'ConfigCarrera',
       component: () => import('../views/ConfigCarrera.vue'),
     },
+    {
+      path: '/control',
+      name: 'ControlCarrera',
+      component: () => import('../views/ControlCarrera.vue'),
+    },
     
   ],
 })

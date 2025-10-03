@@ -8,7 +8,7 @@ const { quitarUltimoApellido } = useNombreUtils()
 export const usevMixStore = defineStore('vMixStore', {
   state: () => ({
     // url: "http://192.168.1.153:8088/", 
-    url: "http://192.168.50.202:8088/", 
+    url: "http://192.168.50.200:8088/", 
     inicioPartida: null,
     cronoEnPrograma: false,
     crono: null,

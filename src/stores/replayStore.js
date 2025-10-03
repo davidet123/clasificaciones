@@ -2,7 +2,7 @@
 import { defineStore } from 'pinia';
 import { parseKmlTracks } from '@/utils/kmlParser';
 
-// Pequeña utilidad
+// Utilidades locales
 function haversineKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const toRad = x => x * Math.PI / 180;
@@ -20,39 +20,39 @@ function bearingDeg(lat1, lon1, lat2, lon2) {
   return (toDeg(Math.atan2(y, x)) + 360) % 360;
 }
 
+// Base del bridge
+const BRIDGE_BASE = 'http://localhost:3000';
+
 export const useReplayStore = defineStore('replay', {
   state: () => ({
-    // Referencia al trackingStore para inyectar puntos
+    // Referencia al trackingStore para inyectar puntos y fijar fuente de tiempo
     _tracking: null,
 
-    // Buffer de replays: id -> array de { ts, id, lat, lon, alt, speedKmh, course }
+    // Buffers: id -> [{ ts, id, lat, lon, alt, speedKmh, course }]
     buffers: {},
-
-    // Índices de reproducción por id
     idxById: {},
 
-    // Límites de tiempo globales del conjunto
+    // Ventana temporal
     t0: null,
     tEnd: null,
 
     // Reloj de reproducción
     playing: false,
     paused: false,
-    speed: 1,          // 1x, 2x, 4x, 8x, 16x
-    tPlay: null,       // ms epoch actual de reproducción
+    speed: 1,     // 1x, 2x, 4x, 8x, 16x
+    tPlay: null,  // ms epoch actual de reproducción
     _timer: null,
     _lastTick: null,
 
     // Opciones
     loop: false,
 
-    // Info de fuente (para UI)
-    source: null,      // 'ndjson' | 'kml'
-    meta: null,        // datos auxiliares (date, raceId, device, fileName, etc.)
+    // Info de fuente
+    source: null, // 'ndjson' | 'kml'
+    meta: null,
 
-    // Último replay seleccionado (mínimo {date, raceId})
+    // Último replay seleccionado
     selected: null,
-    
   }),
 
   getters: {
@@ -63,6 +63,13 @@ export const useReplayStore = defineStore('replay', {
       if (!s.t0 || !s.tEnd || !s.tPlay) return 0;
       const pct = ((s.tPlay - s.t0) / (s.tEnd - s.t0)) * 100;
       return Math.max(0, Math.min(100, pct));
+    },
+    // ⏱️ Reloj de REPLAY (tiempo transcurrido relativo al fichero)
+    elapsedReplayMs: (s) => {
+      if (!s.t0 || !s.tEnd || !s.tPlay) return 0;
+      const v = s.tPlay - s.t0;
+      const max = s.tEnd - s.t0;
+      return Math.max(0, Math.min(max, v));
     },
   },
 
@@ -80,16 +87,15 @@ export const useReplayStore = defineStore('replay', {
       this.meta = null;
       this.loop = false;
       this.speed = 1;
+      this.selected = null;
     },
 
-    /* ============================
-     * NUEVO: selección desde ReplaySelector
-     * ============================ */
-    // Dentro de actions{} de replayStore
+    /* =========================
+     * Selección desde manifest
+     * ========================= */
     async setReplay(manifest) {
-      // manifest esperado: { date, raceId, t0, tEnd, devices: [uniqueId,...] }
       try {
-        // Limpieza y parada por si había algo en marcha
+        // Limpieza
         this.stop();
         this.buffers = {};
         this.idxById = {};
@@ -102,115 +108,119 @@ export const useReplayStore = defineStore('replay', {
         this.loop = false;
         this.selected = manifest || null;
 
-        if (!manifest || !manifest.date || !manifest.raceId || !Array.isArray(manifest.devices) || !manifest.devices.length) {
+        if (!manifest || !manifest.date || !manifest.raceId) {
           console.warn('[replay] Manifest incompleto', manifest);
           return;
         }
+        const date = manifest.date;
+        const raceId = manifest.raceId;
 
-        // Tiempos absolutos del replay (ms epoch)
-        this.t0 = Number(manifest.t0) || null;
-        this.tEnd = Number(manifest.tEnd) || null;
-        if (!(Number.isFinite(this.t0) && Number.isFinite(this.tEnd) && this.tEnd > this.t0)) {
-          console.warn('[replay] t0/tEnd inválidos en manifest; abortando carga');
+        // Normalizar devices
+        let devices = [];
+        if (Array.isArray(manifest.devices) && manifest.devices.length) {
+          devices = manifest.devices
+            .map(d => (typeof d === 'string' ? d : d?.id))
+            .filter(Boolean);
+        }
+
+        const t0ms = Number(manifest.t0);
+        const tEndms = Number(manifest.tEnd);
+
+        // Camino 1: manifest completo
+        if (Number.isFinite(t0ms) && Number.isFinite(tEndms) && tEndms > t0ms && devices.length) {
+          const device = String(devices[0]);
+          const qs = new URLSearchParams({
+            date, raceId, device,
+            from: new Date(t0ms).toISOString(),
+            to:   new Date(tEndms).toISOString()
+          });
+          const url = `${BRIDGE_BASE}/replay/ndjson?${qs.toString()}`;
+          await this.loadNdjsonFromUrl(url, { label: `${date}/${raceId}/${device}` });
+          this.tPlay = this.t0;
           return;
         }
 
-        // De momento reproducimos el primer device de la lista
-        const deviceId = String(manifest.devices[0]);
+        // Camino 2: fallback robusto
+        try {
+          const devQs = new URLSearchParams({ date, raceId });
+          const devRes = await fetch(`${BRIDGE_BASE}/replay/devices?${devQs.toString()}`);
+          if (!devRes.ok) throw new Error(`Devices HTTP ${devRes.status}`);
+          const devList = await devRes.json();
+          const device = String((devList?.[0]) || (devices?.[0]) || '');
 
-        // Construye URL NDJSON con el rango exacto del manifest
-        const fromIso = new Date(this.t0).toISOString();
-        const toIso   = new Date(this.tEnd).toISOString();
-        const qs = new URLSearchParams({
-          date: manifest.date,
-          raceId: manifest.raceId,
-          device: deviceId,
-          from: fromIso,
-          to: toIso,
-        });
-        const url = `/replay/ndjson?${qs.toString()}`;
+          if (!device) {
+            console.warn('[replay] No hay devices para el replay');
+            return;
+          }
 
-        // Carga NDJSON -> rellena this.buffers, idxById, t0, tEnd, tPlay...
-        await this.loadNdjsonFromUrl(url, { label: `${manifest.date}/${manifest.raceId}/${deviceId}` });
-
-        // Fija reloj de reproducción al inicio del rango
-        this.tPlay = this.t0;
-
-        // OJO: aquí NO arrancamos nada. El scheduler va con play() -> _tick()
-        // Si quieres auto-play tras seleccionar, hazlo en la UI: replay.play();
-
-        console.log('[replay] Manifest cargado y NDJSON listo:', deviceId, new Date(this.t0), new Date(this.tEnd));
+          const qs = new URLSearchParams({
+            date, raceId, device,
+            from: '1970-01-01T00:00:00.000Z',
+            to:   '2100-01-01T00:00:00.000Z'
+          });
+          const url = `${BRIDGE_BASE}/replay/ndjson?${qs.toString()}`;
+          await this.loadNdjsonFromUrl(url, { label: `${date}/${raceId}/${device}` });
+          this.tPlay = this.t0;
+        } catch (e2) {
+          console.error('[replay] Fallback setReplay falló', e2);
+        }
       } catch (e) {
         console.error('[replay] setReplay error', e);
       }
     },
 
-
     async loadFromManifest(date, raceId) {
       this.resetAll();
-      const absManUrl = `http://localhost:3000/replays/${encodeURIComponent(date)}/${encodeURIComponent(raceId)}/manifest.json`;
+      const absManUrl = `${BRIDGE_BASE}/replays/${encodeURIComponent(date)}/${encodeURIComponent(raceId)}/manifest.json`;
       try {
-        // 1) Intento con manifest.json
         const manRes = await fetch(absManUrl);
         if (!manRes.ok) throw new Error(`Manifest HTTP ${manRes.status}`);
         const manifest = await manRes.json();
 
         const t0ms = Number(manifest.t0);
         const tEndms = Number(manifest.tEnd);
-        if (!Number.isFinite(t0ms) || !Number.isFinite(tEndms) || tEndms <= t0ms) {
-          throw new Error('Manifest sin rango temporal válido');
-        }
+        let devices = Array.isArray(manifest.devices)
+          ? manifest.devices.map(d => (typeof d === 'string' ? d : d?.id)).filter(Boolean)
+          : [];
 
-        // devices del manifest o fallback a /replay/devices
-        let devices = Array.isArray(manifest.devices) ? manifest.devices : [];
-        if (!devices.length) {
-          const devQs = new URLSearchParams({ date, raceId });
-          const devRes = await fetch(`http://localhost:3000/replay/devices?${devQs.toString()}`);
-          if (!devRes.ok) throw new Error(`Devices HTTP ${devRes.status}`);
-          devices = await devRes.json();
-        }
-        if (!Array.isArray(devices) || !devices.length) throw new Error('No hay dispositivos en el replay');
-
-        const device = String(devices[0]);
-        const fromIso = new Date(t0ms).toISOString();
-        const toIso = new Date(tEndms).toISOString();
-
-        const qs = new URLSearchParams({ date, raceId, device, from: fromIso, to: toIso });
-        const ndjsonUrl = `/replay/ndjson?${qs.toString()}`;
-        await this.loadNdjsonFromUrl(ndjsonUrl, { label: `${date}/${raceId}/${device}` });
-        this.meta = { date, raceId, device, manifestUrl: absManUrl };
-      } catch (e) {
-        console.warn('[replay] manifest no disponible, usando fallback total:', e?.message || e);
-
-        // 2) Fallback sin manifest: obtener devices y pedir TODO el ndjson
-        try {
-          const devQs = new URLSearchParams({ date, raceId });
-          const devRes = await fetch(`http://localhost:3000/replay/devices?${devQs.toString()}`);
-          if (!devRes.ok) throw new Error(`Devices HTTP ${devRes.status}`);
-          const devices = await devRes.json();
-          if (!Array.isArray(devices) || !devices.length) throw new Error('No hay dispositivos en el replay');
-
+        if (Number.isFinite(t0ms) && Number.isFinite(tEndms) && tEndms > t0ms && devices.length) {
           const device = String(devices[0]);
-          // rango amplio para recuperar todo; el parser calcula t0/tEnd
-          const qs = new URLSearchParams({
-            date, raceId, device,
-            from: '1970-01-01T00:00:00.000Z',
-            to:   '2100-01-01T00:00:00.000Z'
-          });
-          const ndjsonUrl = `/replay/ndjson?${qs.toString()}`;
+          const fromIso = new Date(t0ms).toISOString();
+          const toIso   = new Date(tEndms).toISOString();
+          const qs = new URLSearchParams({ date, raceId, device, from: fromIso, to: toIso });
+          const ndjsonUrl = `${BRIDGE_BASE}/replay/ndjson?${qs.toString()}`;
           await this.loadNdjsonFromUrl(ndjsonUrl, { label: `${date}/${raceId}/${device}` });
-          this.meta = { date, raceId, device, manifestUrl: null };
-        } catch (e2) {
-          console.error('[replay] fallback total también falló:', e2);
-          this.resetAll();
-          throw e2;
+          this.meta = { date, raceId, device, manifestUrl: absManUrl };
+          return;
         }
+
+        // Fallback total
+        const devQs = new URLSearchParams({ date, raceId });
+        const devRes = await fetch(`${BRIDGE_BASE}/replay/devices?${devQs.toString()}`);
+        if (!devRes.ok) throw new Error(`Devices HTTP ${devRes.status}`);
+        const devList = await devRes.json();
+        if (!Array.isArray(devList) || !devList.length) throw new Error('No hay dispositivos en el replay');
+
+        const device = String(devList[0]);
+        const qs = new URLSearchParams({
+          date, raceId, device,
+          from: '1970-01-01T00:00:00.000Z',
+          to:   '2100-01-01T00:00:00.000Z'
+        });
+        const ndjsonUrl = `${BRIDGE_BASE}/replay/ndjson?${qs.toString()}`;
+        await this.loadNdjsonFromUrl(ndjsonUrl, { label: `${date}/${raceId}/${device}` });
+        this.meta = { date, raceId, device, manifestUrl: null };
+
+      } catch (e) {
+        console.error('[replay] loadFromManifest error', e);
+        this.resetAll();
+        throw e;
       }
     },
 
-    /* ============================
+    /* =========================
      * CARGA DE NDJSON (bridge)
-     * ============================ */
+     * ========================= */
     async loadNdjsonFromUrl(url, { label = null } = {}) {
       this.stop(); // por si estaba reproduciendo
       this.buffers = {};
@@ -219,12 +229,10 @@ export const useReplayStore = defineStore('replay', {
       this.source = null;
       this.meta = null;
 
-      // Carga completa en memoria (simple y robusto)
       const resp = await fetch(url);
       if (!resp.ok) throw new Error(`NDJSON HTTP ${resp.status}`);
       const text = await resp.text();
 
-      // Parse NDJSON
       const buffers = {};
       let minTs = Infinity, maxTs = -Infinity;
 
@@ -244,13 +252,17 @@ export const useReplayStore = defineStore('replay', {
         if (!Number.isFinite(ts) || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
 
         if (!buffers[id]) buffers[id] = [];
-        buffers[id].push({ ts, id, lat, lon, alt, speedKmh: Number.isFinite(speedKmh) ? speedKmh : null, course: Number.isFinite(course) ? course : null });
+        buffers[id].push({
+          ts, id, lat, lon, alt,
+          speedKmh: Number.isFinite(speedKmh) ? speedKmh : null,
+          course:   Number.isFinite(course)   ? course   : null
+        });
 
         if (ts < minTs) minTs = ts;
         if (ts > maxTs) maxTs = ts;
       }
 
-      // Ordenar y completar velocidad/rumbo faltantes
+      // Ordenar y completar velocidad/rumbo
       for (const id of Object.keys(buffers)) {
         const arr = buffers[id].sort((a, b) => a.ts - b.ts);
         for (let i = 1; i < arr.length; i++) {
@@ -260,13 +272,12 @@ export const useReplayStore = defineStore('replay', {
             const dKm = haversineKm(a.lat, a.lon, b.lat, b.lon);
             const v = dKm / (dt / 3600);
             if (!Number.isFinite(b.speedKmh)) b.speedKmh = v;
-            if (!Number.isFinite(b.course)) b.course = bearingDeg(a.lat, a.lon, b.lat, b.lon);
+            if (!Number.isFinite(b.course))   b.course   = bearingDeg(a.lat, a.lon, b.lat, b.lon);
           }
         }
-        // copia al primero si quedó indefinido
-        if (arr[0] && (!Number.isFinite(arr[0].speedKmh) || !Number.isFinite(arr[0].course)) && arr[1]) {
+        if (arr[0] && arr[1]) {
           if (!Number.isFinite(arr[0].speedKmh)) arr[0].speedKmh = arr[1].speedKmh;
-          if (!Number.isFinite(arr[0].course)) arr[0].course = arr[1].course;
+          if (!Number.isFinite(arr[0].course))   arr[0].course   = arr[1].course;
         }
       }
 
@@ -277,31 +288,28 @@ export const useReplayStore = defineStore('replay', {
       this.tPlay = this.t0;
       this.source = 'ndjson';
       this.meta = label ? { label, url } : { url };
-
-      // No arrancamos aún; que la UI pulse Play
     },
 
-    /* ============================
-     * CARGA DE KML (archivo local)
-     * ============================ */
+    /* =========================
+     * CARGA DE KML (archivo)
+     * ========================= */
     async loadKmlFile(file, { overrideId = null } = {}) {
       this.resetAll();
       const text = await file.text();
       const { tracksById, t0, tEnd } = parseKmlTracks(text);
 
-      // Si el KML trae varios tracks, podemos quedarnos con todos (o con overrideId si se pasó).
+      // Selección por override o todos
       let buffers = {};
       if (overrideId && tracksById[overrideId]) {
         buffers[overrideId] = tracksById[overrideId];
       } else if (overrideId && !tracksById[overrideId]) {
-        // renombrar el primero al overrideId
         const firstId = Object.keys(tracksById)[0];
         buffers[overrideId] = tracksById[firstId] || [];
       } else {
         buffers = tracksById;
       }
 
-      // Asegura velocidad/rumbo
+      // Asegurar velocidad/rumbo
       for (const id of Object.keys(buffers)) {
         const arr = buffers[id].sort((a, b) => a.ts - b.ts);
         for (let i = 1; i < arr.length; i++) {
@@ -309,11 +317,11 @@ export const useReplayStore = defineStore('replay', {
           const dt = Math.max(0.001, (B.ts - A.ts) / 1000);
           const dKm = haversineKm(A.lat, A.lon, B.lat, B.lon);
           if (!Number.isFinite(B.speedKmh)) B.speedKmh = dKm / (dt / 3600);
-          if (!Number.isFinite(B.course)) B.course = bearingDeg(A.lat, A.lon, B.lat, B.lon);
+          if (!Number.isFinite(B.course))   B.course   = bearingDeg(A.lat, A.lon, B.lat, B.lon);
         }
         if (arr[0] && arr[1]) {
           if (!Number.isFinite(arr[0].speedKmh)) arr[0].speedKmh = arr[1].speedKmh;
-          if (!Number.isFinite(arr[0].course)) arr[0].course = arr[1].course;
+          if (!Number.isFinite(arr[0].course))   arr[0].course   = arr[1].course;
         }
       }
 
@@ -326,19 +334,28 @@ export const useReplayStore = defineStore('replay', {
       this.meta = { fileName: file.name };
     },
 
-    /* ============================
+    /* =========================
      * CONTROL DE REPRODUCCIÓN
-     * ============================ */
+     * ========================= */
     play() {
       if (!this.hasData) return;
       if (this.playing && !this.paused) return;
+
+      // Arrancar crono de tracking anclado al t0 del replay y fijar timeSource a tPlay
+      try {
+        if (this._tracking) {
+          // reset limpio (por si venimos de otra sesión)
+          if (typeof this._tracking.resetCrono === 'function') this._tracking.resetCrono();
+          // anclar startTime al inicio del replay (para media/ETA)
+          this._tracking.startTime = this.t0;
+          // fuente de tiempo: tPlay del reproductor
+          this._tracking.setTimeSource?.(() => this.tPlay);
+        }
+      } catch (e) { console.warn('[replay] no se pudo armar el crono en tracking', e); }
+
       this.playing = true;
       this.paused = false;
       this._lastTick = performance.now();
-
-      // Si el tracking tiene timeSource, apúntalo al tPlay
-      try { this._tracking?.setTimeSource?.(() => this.tPlay); } catch {}
-
       this._tick();
     },
 
@@ -346,17 +363,24 @@ export const useReplayStore = defineStore('replay', {
       if (!this.playing) return;
       this.paused = true;
       if (this._timer) { cancelAnimationFrame(this._timer); this._timer = null; }
+      // startTime sigue; como tPlay se congela, todo queda “en pausa”
     },
 
     stop() {
       if (this._timer) { cancelAnimationFrame(this._timer); this._timer = null; }
       this.playing = false;
       this.paused = false;
-      // reinicia índices y tiempo
+      // reinicia índices y tiempo a inicio
       this.idxById = Object.fromEntries(Object.keys(this.buffers).map(id => [id, 0]));
       this.tPlay = this.t0;
-      // Restablece el timeSource del tracking si existía
-      try { this._tracking?.setTimeSource?.(null); } catch {}
+
+      // Desacoplar crono/tiempo de tracking
+      try {
+        if (this._tracking) {
+          this._tracking.resetCrono?.();
+          this._tracking.setTimeSource?.(null);
+        }
+      } catch {}
     },
 
     setSpeed(mult) {
@@ -368,7 +392,8 @@ export const useReplayStore = defineStore('replay', {
       if (!this.hasData || !this.t0 || !this.tEnd) return;
       const clamped = Math.max(0, Math.min(100, pct));
       this.tPlay = this.t0 + ((this.tEnd - this.t0) * (clamped / 100));
-      // Reposicionar índices al punto más cercano <= tPlay
+
+      // Reposicionar índices al punto más cercano <= tPlay e inyectarlo
       for (const id of Object.keys(this.buffers)) {
         const arr = this.buffers[id];
         let lo = 0, hi = arr.length - 1, idx = 0;
@@ -377,20 +402,20 @@ export const useReplayStore = defineStore('replay', {
           if (arr[mid].ts <= this.tPlay) { idx = mid; lo = mid + 1; } else { hi = mid - 1; }
         }
         this.idxById[id] = idx;
-        // Inyecta ese punto inmediatamente
         const p = arr[idx];
         this._emitPoint(p);
       }
     },
 
-    /* ============================
+    /* =========================
      * LOOP PRINCIPAL
-     * ============================ */
+     * ========================= */
     _tick() {
       if (!this.playing || this.paused) return;
       const now = performance.now();
       const dtMs = (now - (this._lastTick || now)) * this.speed;
       this._lastTick = now;
+
       if (this.tPlay == null) this.tPlay = this.t0;
       else this.tPlay = Math.min(this.tEnd ?? this.tPlay, this.tPlay + dtMs);
 
@@ -409,22 +434,20 @@ export const useReplayStore = defineStore('replay', {
       const endedForAll = Object.keys(this.buffers).every(id => (this.idxById[id] ?? 0) >= this.buffers[id].length);
       if (endedForAll) {
         if (this.loop) {
-          // reinicia
+          // Reinicia al comienzo
           this.idxById = Object.fromEntries(Object.keys(this.buffers).map(id => [id, 0]));
           this.tPlay = this.t0;
+          // startTime sigue fijado a t0; no tocar
         } else {
-          // stop
           this.stop();
           return;
         }
       }
-
       this._timer = requestAnimationFrame(() => this._tick());
     },
 
     _emitPoint(p) {
-      if (!this._tracking) return;
-      // Inyecta en tracking como si fuera live
+      if (!this._tracking || !p) return;
       try {
         if (typeof this._tracking.ingestReplayPoint === 'function') {
           this._tracking.ingestReplayPoint(p.id, {

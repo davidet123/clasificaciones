@@ -2,24 +2,45 @@
   <div class="mapa-carrera">
     <div id="map" class="map"></div>
 
-    <!-- Selector de replay por encima del mapa -->
-    <ReplaySelector class="replay-selector" />
+    <!-- Drawer lateral izquierdo con el selector de replay -->
+    <v-navigation-drawer
+      v-model="drawer"
+      location="left"
+      width="340"
+      temporary
+      scrim
+    >
+      <div class="pa-4">
+        <div class="d-flex align-center justify-space-between mb-2">
+          <h2 class="text-h6 mb-0">Replays</h2>
+          <v-btn size="small" variant="text" icon="mdi-close" @click="drawer=false" />
+        </div>
+        <ReplaySelector />
+      </div>
+    </v-navigation-drawer>
 
-    <!-- Botón para ir al perfil (página nueva) -->
+    <!-- Botones flotantes superiores -->
+    <v-btn
+      icon="mdi-menu"
+      color="primary"
+      class="floating-btn left-top"
+      @click="drawer = !drawer"
+      title="Mostrar/Ocultar replays"
+    />
+
     <v-btn
       icon="mdi-chart-areaspline"
       color="primary"
-      class="profile-toggle"
+      class="floating-btn right-top"
       @click="$router.push({ name: 'Perfil' })"
       title="Ver perfil altimétrico"
     />
 
-    <!-- Ajustes existentes -->
     <SidebarAjustes v-model="sidebar" />
     <v-btn
       icon="mdi-tune"
       color="primary"
-      class="sidebar-toggle"
+      class="floating-btn right-top-2"
       @click="sidebar = !sidebar"
       title="Ajustes"
     />
@@ -44,31 +65,82 @@
         <v-text-field v-model="ndDevice" label="device" density="comfortable" hide-details style="max-width: 160px" />
         <v-text-field v-model="ndFrom" label="from ISO" density="comfortable" hide-details style="max-width: 200px" />
         <v-text-field v-model="ndTo" label="to ISO" density="comfortable" hide-details style="max-width: 200px" />
-        <v-btn size="small" :loading="loading" @click="loadNdjson">Cargar NDJSON</v-btn>
+        <v-btn size="small" :loading="loading" @click="loadNdjson" prepend-icon="mdi-database-search">Cargar NDJSON</v-btn>
       </template>
 
       <!-- KML local -->
       <template v-else>
-        <v-btn size="small" :loading="loading" @click="pickFile">Cargar KML (archivo)</v-btn>
+        <v-btn size="small" :loading="loading" @click="pickFile" prepend-icon="mdi-file-upload">Cargar KML</v-btn>
         <input ref="fileEl" type="file" class="hidden" accept=".kml" @change="onFileChange" />
         <v-text-field v-model="kmlOverrideId" label="ID opcional" density="comfortable" hide-details style="max-width: 160px" />
       </template>
 
       <v-divider vertical class="mx-2" />
 
-      <v-btn icon :disabled="!canPlay" @click="replayPlay"><v-icon>mdi-play</v-icon></v-btn>
-      <v-btn icon :disabled="!isPlaying" @click="replayPause"><v-icon>mdi-pause</v-icon></v-btn>
-      <v-btn icon :disabled="!hasData" @click="replayStop"><v-icon>mdi-stop</v-icon></v-btn>
+      <!-- Botones reproductor con iconos visibles y tooltips -->
+      <v-tooltip text="Reproducir" location="top">
+        <template #activator="{ props }">
+          <span v-bind="props">
+            <v-btn
+              :disabled="!canPlay"
+              color="primary"
+              variant="tonal"
+              icon="mdi-play"
+              @click="replayPlay"
+              aria-label="Reproducir"
+            />
+          </span>
+        </template>
+      </v-tooltip>
+
+      <v-tooltip text="Pausar" location="top">
+        <template #activator="{ props }">
+          <span v-bind="props">
+            <v-btn
+              :disabled="!isPlaying"
+              color="primary"
+              variant="tonal"
+              icon="mdi-pause"
+              @click="replayPause"
+              aria-label="Pausar"
+            />
+          </span>
+        </template>
+      </v-tooltip>
+
+      <v-tooltip text="Detener" location="top">
+        <template #activator="{ props }">
+          <span v-bind="props">
+            <v-btn
+              :disabled="!hasData"
+              color="primary"
+              variant="tonal"
+              icon="mdi-stop"
+              @click="replayStop"
+              aria-label="Detener"
+            />
+          </span>
+        </template>
+      </v-tooltip>
 
       <v-divider vertical class="mx-2" />
 
-      <v-btn :variant="speed===1?'tonal':'text'" size="small" @click="replaySpeed(1)">1x</v-btn>
-      <v-btn :variant="speed===2?'tonal':'text'" size="small" @click="replaySpeed(2)">2x</v-btn>
-      <v-btn :variant="speed===4?'tonal':'text'" size="small" @click="replaySpeed(4)">4x</v-btn>
-      <v-btn :variant="speed===8?'tonal':'text'" size="small" @click="replaySpeed(8)">8x</v-btn>
-      <v-btn :variant="speed===16?'tonal':'text'" size="small" @click="replaySpeed(16)">16x</v-btn>
+      <div class="d-flex align-center ga-1">
+        <v-btn :variant="speed===1?'tonal':'text'" size="small" @click="replaySpeed(1)">1x</v-btn>
+        <v-btn :variant="speed===2?'tonal':'text'" size="small" @click="replaySpeed(2)">2x</v-btn>
+        <v-btn :variant="speed===4?'tonal':'text'" size="small" @click="replaySpeed(4)">4x</v-btn>
+        <v-btn :variant="speed===8?'tonal':'text'" size="small" @click="replaySpeed(8)">8x</v-btn>
+        <v-btn :variant="speed===16?'tonal':'text'" size="small" @click="replaySpeed(16)">16x</v-btn>
+      </div>
 
-      <v-btn size="small" variant="text" @click="replayToggleLoop">{{ replay.loop ? 'Loop ON' : 'Loop OFF' }}</v-btn>
+      <v-btn
+        size="small"
+        :variant="replay.loop ? 'tonal' : 'text'"
+        prepend-icon="mdi-repeat"
+        @click="replayToggleLoop"
+      >
+        {{ replay.loop ? 'Loop ON' : 'Loop OFF' }}
+      </v-btn>
 
       <v-divider vertical class="mx-2" />
 
@@ -100,17 +172,19 @@ import { useReplayStore } from '@/stores/replayStore';
 import { formatPace } from '@/utils/geo';
 import SidebarAjustes from '@/components/SidebarAjustes.vue';
 import { useRaceConfigStore } from '@/stores/raceConfigStore';
-import ReplaySelector from '@/components/ReplaySelector.vue';
+import ReplaySelector from '@/components/ReplaySelector.vue'; // 👈 corregido casing (Linux-friendly)
 
 const race = useRaceConfigStore();
 const displayName = (id) => (race.devicesConfig?.[id]?.name?.trim() || id);
 
 const props = defineProps({
-  gpxPath: { type: String, default: '/assets/ruta_marxuquera_1.gpx' },
+  gpxPath: { type: String, default: '/assets/media_albacete.gpx' },
   cpStepMeters: { type: Number, default: undefined }
 });
 
 const sidebar = ref(false);
+const drawer = ref(false); // 👈 estado del drawer izquierdo
+
 const gpx = useGpxStore();
 const tracking = useTrackingStore();
 const replay = useReplayStore();
@@ -184,13 +258,10 @@ function buildPopupContent(d) {
   km.textContent = `Km: ${(d.kmRecorridos ?? 0).toFixed(2)} / ${totalKm.value}`;
   container.appendChild(km);
 
+  // ⬇️ Marca absoluta (tiempo de carrera estimado al final)
   const eta = document.createElement('div');
-  eta.textContent = `ETA: ${d.eta?.toLocaleTimeString?.() || '-'}`;
+  eta.textContent = `Marca: ${Number.isFinite(d.etaMs) ? hms(d.etaMs) : '-'}`;
   container.appendChild(eta);
-
-  const delta = document.createElement('div');
-  delta.textContent = `Δ objetivo: ${d.deltaObjective ?? '-'}`;
-  container.appendChild(delta);
 
   const chip = document.createElement('span');
   chip.textContent = '[REPLAY]';
@@ -287,7 +358,7 @@ async function loadNdjson() {
       from: ndFrom.value,
       to: ndTo.value
     });
-    const url = `/replay/ndjson?${qs.toString()}`;
+    const url = `${BRIDGE_BASE}/replay/ndjson?${qs.toString()}`;
     await replay.loadNdjsonFromUrl(url, { label: `${ndDate.value}/${ndRaceId.value}/${ndDevice.value}` });
     centerToFirst();
   } catch (e) {
@@ -317,14 +388,24 @@ const isPlaying = computed(() => replay.playing && !replay.paused);
 const hasData = computed(() => replay.hasData);
 const speed = computed(() => replay.speed);
 
-function replayPlay(){ replay.play(); }
+function replayPlay(){ 
+  // Usa el reloj del replay como time source (ya lo haces más abajo)
+  if (!tracking.startTime) tracking.startCronoGlobal();
+  replay.play(); }
 function replayPause(){ replay.pause(); }
-function replayStop(){ replay.stop(); }
+function replayStop(){ 
+  replay.stop();
+  // Resetea el crono para que la media y la ETA se reinicien
+  tracking.resetCrono();
+ }
 function replaySpeed(mult){ replay.setSpeed(mult); }
 function replayToggleLoop(){ replay.loop = !replay.loop; }
 
 const progressPct = computed(() => replay.progressPct);
-function onSeekPct(pct){ replay.seekPct(pct); }
+function onSeekPct(pct){ 
+    replay.seekPct(pct);
+  if (pct <= 0) tracking.resetCrono();
+ }
 
 function hms(ms){
   const s = Math.max(0, Math.floor(ms/1000));
@@ -339,8 +420,10 @@ const replayTimeLabel = computed(() => {
 });
 
 /* =======================
- * Lifecycle
+ * Constantes / Lifecycle
  * =======================*/
+const BRIDGE_BASE = 'http://localhost:3000';
+
 onMounted(async () => {
   // Modo replay exclusivo: corta WS en live si estaba
   try { tracking.disconnectWS?.(); } catch {}
@@ -361,7 +444,6 @@ onBeforeUnmount(() => {
   if (intervalId) clearInterval(intervalId);
   if (rafId) cancelAnimationFrame(rafId);
   if (map) map.remove();
-  // devolver timeSource si lo usas en tracking
   try { tracking.setTimeSource?.(null); } catch {}
 });
 </script>
@@ -370,19 +452,16 @@ onBeforeUnmount(() => {
 .mapa-carrera { position: relative; width: 100%; height: 100vh; }
 .map { position: absolute; inset: 0; }
 
-/* Botones */
-.sidebar-toggle { position: absolute; right: 16px; top: 16px; z-index: 400; }
-.profile-toggle { position: absolute; right: 72px; top: 16px; z-index: 400; }
-
-/* Asegura que el selector quede por encima del mapa */
-.replay-selector {
+/* Botones flotantes superiores */
+.floating-btn {
   position: absolute;
-  top: 16px;
-  left: 16px;
   z-index: 1100;
-  pointer-events: auto;
 }
+.left-top   { left: 16px;  top: 16px; }
+.right-top  { right: 16px; top: 16px; }
+.right-top-2{ right: 72px; top: 16px; }
 
+/* Panel de controles */
 .replay-controls {
   position: absolute;
   left: 16px;
@@ -392,9 +471,10 @@ onBeforeUnmount(() => {
   gap: 6px;
   align-items: center;
   padding: 6px 8px;
-  background: rgba(255,255,255,.9);
+  background: rgba(255,255,255,.95);
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0,0,0,.15);
+  backdrop-filter: blur(4px);
 }
 
 .hidden { display: none; }

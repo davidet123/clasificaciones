@@ -109,7 +109,7 @@ async function doLive() {
 
 <style scoped>
 .vmix-mini {
-  width: 240px;
+  width: 100%;
   padding: 10px;
   border-radius: 10px;
   background: #fff;
@@ -128,7 +128,7 @@ async function doLive() {
   font-size: 14px;
 }
 .overlay-select {
-  min-width: 80px;
+  min-width: 180px;
 }
 .val-row {
   min-height: 36px;

@@ -23,10 +23,11 @@
 
       <!-- Contenido scrollable -->
       <div class="sheet-body">
-        <!-- Cronómetro -->
+
+        <!-- Cronómetro (Tracking) -->
         <v-card variant="tonal" class="mb-4">
           <v-card-text class="py-4">
-            <div class="text-overline mb-2">Cronómetro</div>
+            <div class="text-overline mb-2">Cronómetro (Tracking)</div>
             <div class="text-h3 font-mono">{{ elapsedLabel }}</div>
             <div class="mt-2">
               <v-chip size="small" :color="running ? 'success' : 'grey'">
@@ -37,6 +38,22 @@
               <v-btn color="primary" @click="forceStart">Iniciar (CP1)</v-btn>
               <v-btn color="secondary" variant="tonal" @click="stop">Parar</v-btn>
               <v-btn color="error" variant="tonal" @click="reset">Reset</v-btn>
+            </div>
+          </v-card-text>
+        </v-card>
+
+        <!-- Cronómetro (Replay) -->
+        <v-card variant="tonal" class="mb-4" v-show="false">
+          <v-card-text class="py-4">
+            <div class="text-overline mb-2">Cronómetro (Replay)</div>
+            <div class="text-h3 font-mono">{{ elapsedReplayLabel }}</div>
+            <div class="mt-2">
+              <v-chip size="small" :color="replayStateColor">
+                {{ replayStateText }}
+              </v-chip>
+            </div>
+            <div class="mt-1 text-medium-emphasis">
+              Duración: {{ durationReplayLabel }}
             </div>
           </v-card-text>
         </v-card>
@@ -86,7 +103,7 @@
 
               <td>{{ formatPace(d.paceAvgMinPerKm) }}</td>
 
-              <!-- ETA -->
+              <!-- ETA (marca estimada en hh:mm:ss relativa al crono) -->
               <td>
                 <div v-if="d.etaArmed && isFiniteMs(d.etaMs)">
                   {{ formatHMSfromMs(d.etaMs) }}
@@ -132,7 +149,7 @@
                 </div>
               </td>
 
-              <!-- Δ objetivo en segundos con flecha -->
+              <!-- Δ objetivo -->
               <td>
                 <template v-if="d.target?.deltaToPBms != null && d.etaArmed">
                   <div class="d-flex align-center">
@@ -169,14 +186,13 @@
 import { computed, ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useTrackingStore } from '@/stores/trackingStore';
+import { useReplayStore } from '@/stores/replayStore';
 import { useGpxStore } from '@/stores/gpxStore';
 import { formatPace, formatHMSfromMs } from '@/utils/geo';
 import { msToHMS as hms, parseHMSToMs } from '@/stores/trackingStore';
-
 import { useRaceConfigStore } from '@/stores/raceConfigStore';
-const race = useRaceConfigStore();
 
-// Nombre visible → si no hay, cae al id
+const race = useRaceConfigStore();
 const displayName = (id) => (race.devicesConfig?.[id]?.name?.trim() || id);
 
 const props = defineProps({ modelValue: { type: Boolean, default: false } });
@@ -188,16 +204,18 @@ const open = computed({
 });
 
 const tracking = useTrackingStore();
+const replay = useReplayStore();
 const gpx = useGpxStore();
+
 const { list } = storeToRefs(tracking);
 const devices = list;
 const totalCps = computed(() => gpx.cps?.length ? gpx.cps.length - 1 : 0);
 const etaStartPercent = computed(() => tracking.etaStartPercent);
 
-// Cargar config guardada en localStorage al montar ⬅️ NUEVO
+// Config “persistida”
 onMounted(() => { race.init?.(); });
 
-// Sincronizar placeholders cuando lleguen nuevos IDs de Live ⬅️ NUEVO
+// Sincronizar placeholders cuando lleguen IDs de Live
 const idsLive = computed(() => (tracking.list || []).map(d => d.id));
 watch(
   () => idsLive.value.join(','),
@@ -205,7 +223,7 @@ watch(
   { immediate: true }
 );
 
-// Crono
+// Crono (Tracking) — basado en startTime de tracking
 const now = ref(Date.now());
 let int = null;
 onMounted(() => { int = setInterval(() => { now.value = Date.now(); }, 250); });
@@ -248,7 +266,6 @@ function formatDeltaSeconds(ms){
   const s = Math.round(Math.abs(ms)/1000);
   return `${sign(ms)} ${s}s`;
 }
-
 function consColor(d){
   const label = d.consistency?.paceVarLabel || '';
   if (label === 'muy constante') return 'success';
@@ -256,27 +273,41 @@ function consColor(d){
   if (label === 'variable') return 'warning';
   return 'error';
 }
-
 function isFiniteMs(v){ return v != null && isFinite(v); }
 
-/* Altura fija del panel: cambia aquí si quieres otro valor */
-const sheetHeightPx = 500; // ← ajusta este número (por ejemplo 400, 600, 800)
-const sheetStyle = computed(() => {
-  return `
-    position: fixed;
-    left: 0; right: 0; bottom: 0;
-    height: ${sheetHeightPx}px;
-    z-index: 1001;
-    border-top-left-radius: 16px;
-    border-top-right-radius: 16px;
-    display: flex;
-    flex-direction: column;
-  `;
+// ⏱️ Crono (Replay)
+const elapsedReplayMs = computed(() => replay.elapsedReplayMs || 0);
+const elapsedReplayLabel = computed(() => formatHMSfromMs(elapsedReplayMs.value));
+const durationReplayLabel = computed(() => formatHMSfromMs(replay.durationMs || 0));
+const replayStateText = computed(() => {
+  if (!replay.hasData) return 'Sin datos';
+  if (replay.playing && !replay.paused) return 'Reproduciendo';
+  if (replay.playing && replay.paused) return 'Pausado';
+  return 'Detenido';
 });
+const replayStateColor = computed(() => {
+  if (!replay.hasData) return 'grey';
+  if (replay.playing && !replay.paused) return 'success';
+  if (replay.playing && replay.paused) return 'info';
+  return 'grey';
+});
+
+/* Altura fija del panel */
+const sheetHeightPx = 500;
+const sheetStyle = computed(() => `
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  height: ${sheetHeightPx}px;
+  z-index: 1001;
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
+  display: flex;
+  flex-direction: column;
+`);
 </script>
 
 <style scoped>
-/* Animación de entrada/salida inferior */
+/* Animación */
 .slide-up-enter-active, .slide-up-leave-active {
   transition: transform .22s ease, opacity .22s ease;
 }
@@ -285,7 +316,7 @@ const sheetStyle = computed(() => {
   opacity: 0;
 }
 
-/* Layout del sheet */
+/* Layout */
 .bottom-sheet { overflow: hidden; }
 .sheet-header {
   display: flex;
@@ -299,12 +330,7 @@ const sheetStyle = computed(() => {
   margin: 6px auto 8px 8px;
 }
 .title { font-weight: 600; display: flex; align-items: center; }
-
-.sheet-body {
-  flex: 1;
-  overflow: auto;
-  padding: 12px;
-}
+.sheet-body { flex: 1; overflow: auto; padding: 12px; }
 
 .font-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
@@ -312,4 +338,5 @@ const sheetStyle = computed(() => {
 .whitespace { white-space: nowrap; }
 .text-success { color: #2e7d32; }
 .text-error { color: #c62828; }
+.text-medium-emphasis { opacity: .7; }
 </style>

@@ -231,7 +231,7 @@ export const useTrackingStore = defineStore('tracking', {
       // ===== v efectiva + clasificación por modo =====
       const gpsSpeedOk = velKmhRaw >= this.minValidGpsSpeedKmh;
 
-      // velocidad de pista con umbrales por modo, se decide después de clasificar, así que primero una estimación preliminar
+      // velocidad de pista preliminar para no quedarnos a cero si el GPS viene bajo
       const trackSpeedPre = computeTrackSpeedKmh(d.historyProj, ts, 15, 25, this.minTrackDeltaMeters, this.fallbackMaxJumpKmh);
 
       // v efectiva preliminar
@@ -263,18 +263,30 @@ export const useTrackingStore = defineStore('tracking', {
       // sustituye último punto de hist para coherencia
       if (d._vEffHist?.length) d._vEffHist[d._vEffHist.length - 1].v = vEffectiveKmh;
 
-      // ===== Proyección sobre GPX con hint desde km forward =====
+      // ===== Proyección sobre GPX con HINT por distancia esperada (salto grande) =====
       const lastKmFwd = Math.max(0, d.kmMaxForward || 0);
-      // baseIdx a partir de distancia acumulada (no del cpIdx visual)
-      const baseIdx = findCpIdxByKm(gpx.cps, lastKmFwd);
-      // pequeño backtrack para no atascarse en giros
+
+      // Distancia esperada desde el último tick: v (km/h) * dt(h)
+      const dtSec = Math.min(8, Math.max(0, d.status.gapSec || 0));   // typical ~5s; clamp 0..8
+      let deltaKmExp = (vEffectiveKmh > 0 ? (vEffectiveKmh * dtSec) / 3600 : 0);
+
+      // Clamp para no irnos a la luna pero permitir moto/bici (hasta ~120 m)
+      const MAX_JUMP_KM = 0.12;  // 120 m
+      const MIN_JUMP_KM = 0.005; // 5 m para evitar 0 en gaps cortos
+      deltaKmExp = Math.min(MAX_JUMP_KM, Math.max(MIN_JUMP_KM, deltaKmExp));
+
+      const seedKm = lastKmFwd + deltaKmExp;
+
+      // baseIdx desde seedKm (no desde cpIdx visual)
+      const baseIdx = findCpIdxByKm(gpx.cps, seedKm);
+      // pequeño backtrack para no atascarse en curvas
       const startIdx = Math.max(0, baseIdx - mp.backtrackSegs);
 
       const proj = progressBetweenCps(lat, lon, gpx.cps, gpx.totalKm, startIdx);
       let kmRaw = proj.kmRecorridos;
       let kmRestRaw = proj.kmRestantes;
 
-      // Off-route con strikes para no penalizar un tick
+      // Off-route con strikes para no penalizar un tick aislado
       const offR = proj && typeof proj.distDesdeCPm === 'number'
         ? (proj.distDesdeCPm < -this.offRouteMaxMeters || proj.distHastaCPm < -this.offRouteMaxMeters)
         : false;
@@ -286,7 +298,6 @@ export const useTrackingStore = defineStore('tracking', {
       if (this.startTime) {
         if (d.kmStartAtCrono == null) d.kmStartAtCrono = kmRaw;
 
-        // si el nuevo kmRaw baja un poquito, ignóralo (tolerancia)
         const backTolKm = mp.backToleranceMeters / 1000;
         if (d.kmMaxForward != null && kmRaw < d.kmMaxForward && (d.kmMaxForward - kmRaw) <= backTolKm) {
           kmRaw = d.kmMaxForward;

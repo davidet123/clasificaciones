@@ -33,6 +33,7 @@
 <style>
 body {
   padding: 20px;
+  background-color: #9b9b9b;
 }
 
 </style>

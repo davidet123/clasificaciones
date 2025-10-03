@@ -1,4 +1,9 @@
 <template>
+  <v-row>
+    <v-col class="text-center">
+
+    </v-col>
+  </v-row>
   <v-container fluid class="control-page pa-3">
     <div class="header">
       <div class="title">
@@ -11,7 +16,7 @@
           label="vMix API URL"
           density="compact"
           hide-details
-          style="max-width: 320px"
+          style="max-width: 800px"
         />
         <v-btn class="ml-2" size="small" variant="tonal" @click="ping">Ping</v-btn>
       </div>
@@ -75,44 +80,44 @@
           <VmixControlMini
             label="Velocidad"
             :input="metroInput"
-            field="Velocidad"
+            field="texto"
             :value="velInstStr"
-            :overlay="1"
+            :overlay="2"
           />
           <VmixControlMini
             label="Dist. Restante"
             :input="metroInput"
-            field="Velocidad"
+            field="texto"
             :value="restanteStr"
             :overlay="2"
           />
           <VmixControlMini
             label="Velocidad media"
-            :input="'Velocidad_media'"
-            field="Velocidad"
+            :input="metroInput"
+            field="texto"
             :value="velMediaStr"
             :overlay="2"
           />
           <VmixControlMini
             label="Ritmo"
-            :input="'RITMO'"
-            field="Velocidad"
+            :input="metroInput"
+            field="texto"
             :value="ritmoStr"
-            :overlay="4"
+            :overlay="2"
           />
           <VmixControlMini
             label="Pendiente"
-            :input="'Pendiente'"
-            field="Velocidad"
+            :input="metroInput"
+            field="texto"
             :value="pendienteStr"
-            :overlay="5"
+            :overlay="2"
           />
           <VmixControlMini
             label="ETA total"
-            :input="'ETA'"
-            field="Velocidad"
+            :input="metroInput"
+            field="texto"
             :value="etaStr"
-            :overlay="6"
+            :overlay="2"
           />
         </div>
       </div>
@@ -377,18 +382,18 @@ const etaStr = computed(() => {
   }
 
 // Título de métricas
-const metroInput = 'Metro'
+const metroInput = 'DATOS_GPS'
 
 // Autoenvío a vMix (mantenemos lo existente)
 function pushAllToVmix() {
   if (!dev.value) return
-  vmix.setTextCached('Velocidad', 'Velocidad', velInstStr.value)
-  vmix.setTextCached('Velocidad_media', 'Velocidad', velMediaStr.value)
-  vmix.setTextCached(metroInput, 'Velocidad', kmStr.value)
-  vmix.setTextCached(metroInput, 'Velocidad', restanteStr.value)
-  vmix.setTextCached(metroInput, 'Velocidad', ritmoStr.value)
-  vmix.setTextCached('Pendiente', 'Velocidad', pendienteStr.value)
-  vmix.setTextCached('Eta', 'Velocidad', etaStr.value)
+  vmix.setTextCached(metroInput, 'texto', velInstStr.value)
+  vmix.setTextCached(metroInput, 'texto', velMediaStr.value)
+  vmix.setTextCached(metroInput, 'texto', kmStr.value)
+  vmix.setTextCached(metroInput, 'texto', restanteStr.value)
+  vmix.setTextCached(metroInput, 'texto', ritmoStr.value)
+  vmix.setTextCached(metroInput, 'texto', pendienteStr.value)
+  vmix.setTextCached(metroInput, 'texto', etaStr.value)
 }
 
 let rafToken = null
@@ -432,7 +437,7 @@ async function ping() {
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
 .row { display: flex; gap: 8px; align-items: center; }
 
-.right { display: flex; align-items: center; }
+.right { display: flex; align-items: center; width: 800px;}
 .wp-selector { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 0 10px; }
 .mr-1 { margin-right: 4px; }
 .mt-1 { margin-top: 4px; }

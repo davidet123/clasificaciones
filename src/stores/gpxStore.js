@@ -22,7 +22,7 @@ export const useGpxStore = defineStore('gpx', {
   }),
   actions: {
     // async loadFromPublic(path = '/assets/gran-fondo-de-siete-aguas.gpx', stepMeters) {
-    async loadFromPublic(path = '/assets/ruta_casa_1.gpx', stepMeters) {
+    async loadFromPublic(path = '/assets/media_albacete.gpx', stepMeters) {
       try {
         this.loading = true; this.error = null;
 

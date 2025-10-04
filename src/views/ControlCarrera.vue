@@ -1,9 +1,4 @@
 <template>
-  <v-row>
-    <v-col class="text-center">
-
-    </v-col>
-  </v-row>
   <v-container fluid class="control-page pa-3">
     <div class="header">
       <div class="title">
@@ -12,15 +7,26 @@
       </div>
       <div class="right">
         <v-text-field
-          v-model="vmix.url"
-          label="vMix API URL"
-          density="compact"
-          hide-details
-          style="max-width: 800px"
+        v-model="vmix.url"
+        label="vMix API URL"
+        density="compact"
+        hide-details
+        style="max-width: 800px"
         />
         <v-btn class="ml-2" size="small" variant="tonal" @click="ping">Ping</v-btn>
       </div>
     </div>
+    <v-row>
+      <v-col class="text-center" cols="9">
+        <GenericosVmix />
+      </v-col>
+      <v-col cols="3" class="text-center">
+        <h4>CLASIFICACIONES</h4>
+        <v-btn color="success" size="small" @click="router.push('/clasificaciones')">
+          IR CLASIFICACIONES
+        </v-btn>
+      </v-col>
+    </v-row>
 
     <!-- Selector de waypoint (botones) -->
     <div class="wp-selector">
@@ -79,45 +85,45 @@
         <div class="grid">
           <VmixControlMini
             label="Velocidad"
-            :input="metroInput"
-            field="texto"
+            :input="'VELOCIDAD'"
+            field="VALOR"
             :value="velInstStr"
-            :overlay="2"
+            :overlay="3"
           />
           <VmixControlMini
             label="Dist. Restante"
-            :input="metroInput"
-            field="texto"
+            :input="'DIST_RESTANTE'"
+            field="VALOR"
             :value="restanteStr"
-            :overlay="2"
+            :overlay="3"
           />
           <VmixControlMini
             label="Velocidad media"
-            :input="metroInput"
-            field="texto"
+            :input="'VELOCIDAD_MEDIA'"
+            field="VALOR"
             :value="velMediaStr"
-            :overlay="2"
+            :overlay="3"
           />
           <VmixControlMini
             label="Ritmo"
-            :input="metroInput"
-            field="texto"
+            :input="'RITMO'"
+            field="VALOR"
             :value="ritmoStr"
-            :overlay="2"
+            :overlay="3"
           />
           <VmixControlMini
             label="Pendiente"
-            :input="metroInput"
-            field="texto"
+            :input="'PENDIENTE'"
+            field="VALOR"
             :value="pendienteStr"
-            :overlay="2"
+            :overlay="3"
           />
           <VmixControlMini
             label="ETA total"
-            :input="metroInput"
-            field="texto"
+            :input="'MARCA'"
+            field="VALOR"
             :value="etaStr"
-            :overlay="2"
+            :overlay="3"
           />
         </div>
       </div>
@@ -163,7 +169,7 @@
 
 
      <!-- Crono (vMix) -->
-      <div class="block">
+      <!-- <div class="block">
         <div class="block-title">Crono (vMix)</div>
         <div class="row">
           <v-btn size="small" @click="vmix.iniciarCrono()">Start</v-btn>
@@ -181,7 +187,6 @@
             Preview
           </v-btn>
 
-          <!-- Live: cambia solo estado local -->
           <v-btn
             size="small"
             @click="toggleCronoLive"
@@ -192,7 +197,7 @@
             {{ cronoOnAir ? 'On Air' : 'Live' }}
           </v-btn>
         </div>
-      </div>
+      </div> -->
     </div>
   </v-container>
 </template>
@@ -208,7 +213,11 @@ import VmixControlMini from '@/components/VmixControlMini.vue'
 import RunnerVmixCard from '@/components/RunnerVmixCard.vue'
 import RunnerHistoryItem from '@/components/RunnerHistoryItem.vue'
 import { formatPace } from '@/utils/geo'
+import { storeToRefs } from 'pinia'
+import GenericosVmix from '@/components/GenericosVmix.vue'
+import { useRouter } from 'vue-router'
 
+const router = useRouter()
 const tracking = useTrackingStore()
 const gpx = useGpxStore()
 const vmix = usevMixStore()
@@ -219,11 +228,14 @@ waypoints.load()
 
 const runners = useRunnersStore()
 
+const { inscritos } = storeToRefs(runners)
+
 const dorsalQuery = ref('')
 const runnerSel = computed(() => {
   const d = parseInt(dorsalQuery.value, 10)
+  // console.log(runners.list)
   if (!Number.isFinite(d)) return null
-  return runners.list.find(r => Number(r.dorsal) === d) || null
+  return inscritos.value.find(r => Number(r.dorsal) === d) || null
 })
 function searchRunner(){ /* trigger computeds; no hacemos nada más */ }
 
@@ -361,7 +373,7 @@ const etaStr = computed(() => {
   const runner = computed(() => {
     const num = Number(dorsalInput.value)
     if (!num) return null
-    return runners.list.find(r => r.dorsal === num) || null
+    return inscritos.value.find(r => r.dorsal === num) || null
   })
 
   async function doPreviewCorredor() {
@@ -387,13 +399,13 @@ const metroInput = 'DATOS_GPS'
 // Autoenvío a vMix (mantenemos lo existente)
 function pushAllToVmix() {
   if (!dev.value) return
-  vmix.setTextCached(metroInput, 'texto', velInstStr.value)
-  vmix.setTextCached(metroInput, 'texto', velMediaStr.value)
-  vmix.setTextCached(metroInput, 'texto', kmStr.value)
-  vmix.setTextCached(metroInput, 'texto', restanteStr.value)
-  vmix.setTextCached(metroInput, 'texto', ritmoStr.value)
-  vmix.setTextCached(metroInput, 'texto', pendienteStr.value)
-  vmix.setTextCached(metroInput, 'texto', etaStr.value)
+  vmix.setTextCached("VELOCIDAD", 'VALOR', velInstStr.value)
+  vmix.setTextCached("VELOCIDAD_MEDIA", 'VALOR', velMediaStr.value)
+  vmix.setTextCached("DISTANCIA", 'VALOR', kmStr.value)
+  vmix.setTextCached("DIST_RESTANTE", 'VALOR', restanteStr.value)
+  vmix.setTextCached("RITMO", 'VALOR', ritmoStr.value)
+  vmix.setTextCached("PENDIENTE", 'VALOR', pendienteStr.value)
+  vmix.setTextCached("MARCA", 'VALOR', etaStr.value)
 }
 
 let rafToken = null

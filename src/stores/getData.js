@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import axios from 'axios'
 
 import Papa from 'papaparse'
+// import { consoleError } from 'vuetify/lib/util'
 
 export const useGetDatastore = defineStore('getData',  {
   state: () => ({
@@ -21,6 +22,7 @@ export const useGetDatastore = defineStore('getData',  {
     // https://www.alcanzatumeta.es/resultados-medallas.php?e=1002805
     // num_carrera: '832006',
     num_carrera: '1002805',
+    urlCSV: 'http://localhost:3500/csv',
     datos: [],
     splits: ['CP1', 'Vuelta Meta', 'CP2', 'Vuelta CP1', 'Meta'],
     testDatos: [
@@ -476,6 +478,48 @@ export const useGetDatastore = defineStore('getData',  {
         console.error('Error al cargar archivo:', error)
       }
       console.log(this.inscritos)
+    },
+    async cargarCSVLocal() {
+      try {
+        const response = await fetch(this.urlCSV)
+        const text = await response.text()
+
+        const parsed = Papa.parse(text, {
+          header: true,
+          delimiter: ';',
+          skipEmptyLines: true,
+        })
+        console.log(parsed)
+        // const parsed = Papa.parse(text, {
+        //   header: true,
+        //   delimiter: ';',
+        //   skipEmptyLines: true,
+        //   complete: (result) => {
+        //     this.inscritos = result.data
+            
+        //   },
+        //   error: (err) => {
+        //     console.error('Error al parsear CSV:', err)
+        //   }
+        // })
+        // this.inscritos = parsed.data.map(el => {
+        //   const corredor = {}
+        //   // console.log(el)
+
+        //   corredor.nombre = `${el.Nombre} ${el.Apellidos}`
+        //   corredor.dorsal = el.Dorsal
+        //   // corredor.meta = el["TIEMPO OFICIAL"]
+        //   corredor.categoria = el["Cat."]
+        //   corredor.prueba = el.Prueba
+        //   // corredor.sexo = el["SEXO"]
+        //   // console.log(el)
+
+        //   return corredor
+      //   })
+      } catch (error) {
+        console.error('Error al cargar archivo:', error)
+      }
+      // console.log(this.inscritos)
     },
     obtenerHoraActual() {
       const ahora = new Date();

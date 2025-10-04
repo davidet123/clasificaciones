@@ -1,17 +1,17 @@
 <template>
   <v-row class="my-2">
-    <v-col cols="2">
+    <!-- <v-col cols="2">
       <v-select
         v-model="textoDSK"
         :items = "listadoDSK"
         label="DSK genérico"
       ></v-select>
-    </v-col>
-    <v-col cols="1">
+    </v-col> -->
+    <!-- <v-col cols="1">
       <BotonLive @goLivevMix="goLive" :nombre="'DSK_GENERICO'"/>
       <BotonPrevio @goPreviovMix="goPrevio" :nombre="'DSK_GENERICO'"/>
-    </v-col>
-    <v-col cols="2">
+    </v-col> -->
+    <v-col cols="4">
       <v-select
       v-model="textoPuntoKM"
       :items = "puntosKM"
@@ -19,11 +19,11 @@
       ></v-select>
     </v-col>
     <v-col cols="1">
-      <BotonLive @goLivevMix="goLive" :nombre="'PUNTO_KILOMETRICO'"/>
-      <BotonPrevio @goPreviovMix="goPrevio" :nombre="'PUNTO_KILOMETRICO'"/>
+      <BotonLive @goLivevMix="goLive" :nombre="'PUNTO_KM'"/>
+      <BotonPrevio @goPreviovMix="goPrevio" :nombre="'PUNTO_KM'"/>
       
     </v-col>
-    <v-col cols="3" class="border-md">
+    <v-col cols="6" class="border-md">
       <v-row>
 
         <v-col cols="6" class="text-center">
@@ -47,37 +47,40 @@
       </v-row>
 
     </v-col>
-    <v-col cols="3" class="text-center border-sm">
+    <!-- <v-col cols="3" class="text-center border-sm">
       <h4>DOBLE VENTANA</h4>
       <BotonLive @goLivevMix="goLive" :nombre="'DOBLE VENTANA'"/>
       <BotonPrevio @goPreviovMix="goPrevio" :nombre="'DOBLE VENTANA'"/>
 
-    </v-col>
+    </v-col> -->
     
   </v-row>
   <v-row class="ma-0 pa-0">
-        <v-col cols="3">
-          <v-text-field
-            v-model="tiempo.cielo"
-            label="CIELO"
-            density="compact"
-          ></v-text-field>
-        </v-col>
-        <v-col cols="3">
-          <v-text-field
-            v-model="tiempo.viento"
-            label="VIENTO"
-            density="compact"
-          ></v-text-field>
-        </v-col>
-        <v-col cols="3">
-          <v-text-field
-            v-model="tiempo.temperatura"
-            label="TEMPERATURA"
-            density="compact"
-          ></v-text-field>
+    <v-col class="text-center" cols="12">
+      <h5>METEO</h5>
     </v-col>
-    <v-col cols="1">
+    <v-col cols="3" offset="1">
+      <v-text-field
+        v-model="tiempo.cielo"
+        label="CIELO"
+        density="compact"
+      ></v-text-field>
+    </v-col>
+    <v-col cols="3">
+      <v-text-field
+        v-model="tiempo.viento"
+        label="VIENTO"
+        density="compact"
+      ></v-text-field>
+    </v-col>
+    <v-col cols="3">
+      <v-text-field
+        v-model="tiempo.temperatura"
+        label="TEMPERATURA"
+        density="compact"
+      ></v-text-field>
+    </v-col>
+    <v-col cols="2">
       <BotonLive @goLivevMix="goLive" :nombre="'METEO'"/>
       <BotonPrevio @goPreviovMix="goPrevio" :nombre="'METEO'"/>
     </v-col>
@@ -164,17 +167,17 @@
 
 
 
-  watch(() => textoDSK.value, val => {
-    if(val !== null) {
-      const nombre = 'DSK_GENERICO'
-      const capa = 'GENERICO'
-      vMixStore.liveUpdate(nombre, capa, val)
-    }
-  })
+  // watch(() => textoDSK.value, val => {
+  //   if(val !== null) {
+  //     const nombre = 'DSK_GENERICO'
+  //     const capa = 'GENERICO'
+  //     vMixStore.liveUpdate(nombre, capa, val)
+  //   }
+  // })
   watch(() => textoPuntoKM.value, val => {
     if(val !== null) {
-      const nombre = 'PUNTO_KILOMETRICO'
-      const capa = 'GENERICO'
+      const nombre = 'PUNTO_KM'
+      const capa = 'NUMERO'
       vMixStore.liveUpdate(nombre, capa, val)
     }
   })
@@ -182,11 +185,11 @@
     if(val !== null) {
       const nombre = 'METEO'
       let capa
-      capa = 'CIELO_TXT'
+      capa = 'CIELO'
       vMixStore.liveUpdate(nombre, capa, val.cielo)
-      capa = 'VIENTO_TXT'
+      capa = 'VIENTO'
       vMixStore.liveUpdate(nombre, capa, val.viento)
-      capa = 'TEMP_TXT'
+      capa = 'TEMPERATURA'
       vMixStore.liveUpdate(nombre, capa, val.temperatura)
     }
   },{

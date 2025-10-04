@@ -54,6 +54,12 @@ const router = createRouter({
       name: 'ControlCarrera',
       component: () => import('../views/ControlCarrera.vue'),
     },
+    {
+      path: '/clasificaciones',
+      name: 'Clasificaciones',
+      component: () => import('../views/Clasificaciones.vue'),
+    },
+
     
   ],
 })

@@ -15,16 +15,22 @@
   import { useGetDatastore } from './stores/getData'
   import { usevMixStore } from './stores/vMix'
   import { onBeforeMount } from 'vue'
+  import { useRunnersStore } from './stores/runnersStore'
 
   const getDataStore = useGetDatastore()
   const vMixStore = usevMixStore()
 
+  const runnersStore = useRunnersStore()
+
   onBeforeMount(() => {
+
+    runnersStore.cargarCSV()
+    runnersStore.cargarClasificacionesCSV()
     // const url = 'https://www.alcanzatumeta.es/resultados-medallas.php?e=832006'
     // const url = 'https://www.alcanzatumeta.es/resultados-medallas/832006.csv'
     const url = 'https://www.alcanzatumeta.es/resultados-medallas.php?e=1002805'
     // getDataStore.cargarDesdeURL()
-    // getDataStore.cargarCSV()
+    // getDataStore.cargarCSVLocal()
     // vMixStore.getStatusVmix()
   })
 
